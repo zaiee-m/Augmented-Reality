@@ -20,10 +20,9 @@ def main():
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
-            print("A")
             break
         
-        cv2.imshow("Frame", frame)
+        cv2.imshow("Frame", prepreocess_frame(frame))
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

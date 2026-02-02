@@ -1,6 +1,7 @@
 import cv2 # OpenCV - Only for video capture and display
 import argparse
 from utils import * # Define custom CV functions in utils.py
+import sys
 
 def main():
     parser = argparse.ArgumentParser(description="AR Tag Detection and Overlay")
@@ -22,13 +23,43 @@ def main():
         if not ret:
             break
         
-        cv2.imshow("Frame", prepreocess_frame(frame))
+        cv2.imshow("Frame", extract_and_draw_final(frame))
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
             
     cap.release()
     cv2.destroyAllWindows()
+
+# def main():
+#     parser = argparse.ArgumentParser(description="AR Tag Detection on Single Image")
+    
+#     # 1. Update Argument to take an image path
+#     parser.add_argument("--image", type=str, required=True, help="Path to the input image file.")
+    
+#     args = parser.parse_args()
+    
+#     # 2. Load the Image
+#     frame = cv2.imread(args.image)
+    
+#     if frame is None:
+#         print(f"Error: Could not load image from '{args.image}'. Check the path.")
+#         sys.exit(1)
+        
+#     print(f"Processing image: {args.image} | Size: {frame.shape}")
+
+#     # 3. Process (Preprocess -> Extract -> Filter -> Draw)
+#     # This uses your consolidated 'extract_and_draw_final' function
+#     result_image = extract_and_draw_final(frame)
+    
+#     # 4. Display
+#     cv2.imshow("Detected AR Tag", result_image)
+    
+#     # 5. Wait Indefinitely (0) until a key is pressed
+#     print("Processing complete. Press any key to close the window...")
+#     cv2.waitKey(0)
+    
+#     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()

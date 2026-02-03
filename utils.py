@@ -207,80 +207,105 @@ def fill_polygon(image, vertices, color=(0, 0, 255)):
                     # Fill the horizontal segment
                     image[y, x_start:x_end] = color
 
+def detect_edges_binary(binary_image):
+    """
+    Detects edges in a binary image using Morphological Gradient.
+    Method: Edge = Original - Eroded
+    Speed: Vectorized NumPy (Extremely Fast)
+    
+    Args:
+        binary_image: 2D NumPy array with values 0 (Black) and 255 (White).
+    
+    Returns:
+        edge_image: Binary image where edges are 255 and background is 0.
+    """
+    # 1. Convert to Boolean (0/1) for fast bitwise operations
+    # Assumes object is White (255) and Background is Black (0)
+    bool_img = (binary_image == 255)
+    
+    # 2. Perform Erosion (Shrink the white shapes by 1 pixel)
+    # A pixel survives erosion only if ALL its 4-neighbors are also White.
+    
+    # Pad with False (Black) to handle borders automatically
+    padded = np.pad(bool_img, pad_width=1, mode='constant', constant_values=False)
+    
+    # Shift padded image to align neighbors
+    north = padded[0:-2, 1:-1]
+    south = padded[2:,   1:-1]
+    west  = padded[1:-1, 0:-2]
+    east  = padded[1:-1, 2:]
+    
+    # Vectorized AND: Pixel is TRUE only if it and all neighbors are TRUE
+    eroded = north & south & west & east & bool_img
+    
+    # 3. Subtract Eroded from Original
+    # The difference are the pixels that were White but had a Black neighbor.
+    # These are exactly the edge pixels.
+    # logical_xor works like subtraction here because eroded is a subset of bool_img
+    edges_bool = bool_img ^ eroded 
+    
+    # 4. Convert back to Uint8 (0-255)
+    edge_image = (edges_bool.astype(np.uint8)) * 255
+    
+    return edge_image
+
 def extract_and_draw_final(frame, resizing_factor=4):
     print(f"--- Processing Frame (Scale: 1/{resizing_factor}) ---")
     
     # A. PREPROCESSING
-    # If factor is 1, this just returns a copy of the frame
+    # Downscale for speed (Processing 1080p is unnecessary for detection)
     small_frame = fast_scale(frame, scale_factor=resizing_factor)
     grey = to_grayscale(small_frame)
     
-
+    # Gaussian Blur (or use fast_box_blur if you implemented it)
     blurred = gaussian_blur(grey, kernel_size=9, sigma=2.0)
-    
-    # B. BINARIZATION (Otsu + Auto-Invert)
-    # Separates Grey Floor from White Paper
+
+    # B. BINARIZATION
+    # Using your optimized global/Otsu thresholding
     binary = binarization(blurred)
     
-    raw_hierarchy = extract_contours_hierarchical(binary)
+    gradient =  detect_edges_binary(binary)
+    # C. EXTRACT CONTOURS (Optimized Flat Version)
+    # The function you defined now uses 'visited_map' and candidate selection.
+    # It returns a simple list of arrays, so we don't need a hierarchy stack.
+    print("DEBUG: Extracting contours...")
+    candidate_contours = extract_contours_from_gradient(gradient)
+    print(f"DEBUG: Found {len(candidate_contours)} total contours.")
 
-    return binary
-
-    print(f"DEBUG: Found {len(raw_hierarchy)} top-level shapes.")
-
-    # 2. FLATTEN HIERARCHY
-    # We want ALL contours: The outer box, the inner box, and the symbols inside.
-    candidate_contours = []
-    
-    # Initialize stack with the top-level contours
-    stack = list(raw_hierarchy)
-    
-    while stack:
-        # Pop one shape to process
-        current_shape = stack.pop()
-        
-        # A. Add this shape's coordinates to our final list
-        candidate_contours.append(current_shape['contour'])
-        
-        # B. If it has children, add them to the stack so we process them next
-        if current_shape['children']:
-            stack.extend(current_shape['children'])
-
-    print(f"DEBUG: Flattened hierarchy contains {len(candidate_contours)} total contours.")
-
-    # E. GEOMETRIC FILTERING (Size & Squareness)
-    # Since we are now including small inner symbols (grandchildren), 
-    # we must be careful not to filter them out with a high min_area.
-    
-    # If looking for the big AR tag frames only: keep area high (e.g. 1000)
-    # If looking for the tiny inner data bits: reduce area (e.g. 10 or 20)
+    # return gradient
+    # return binary    
+    # D. GEOMETRIC FILTERING
+    # Adjust thresholds based on resizing. 
+    # If we want to detect the small data bits inside the tags, min_area must be small.
     min_area_thresh = 50 if resizing_factor == 1 else 10
     
-    # We pass 'candidate_contours' (which is now a clean list of arrays)
-    # valid_tags = filter_contours(candidate_contours, min_area=min_area_thresh)
+    # (Assuming you have a filter_contours function, or use list comprehension)
+    # valid_tags = [c for c in candidate_contours if cv2.contourArea(c) > min_area_thresh]
     
-    print(f"DEBUG: Filtered down to {len(candidate_contours)} valid tags.")
+    # For now, using your placeholder:
+    valid_tags = filter_contours(candidate_contours, min_area=min_area_thresh)
+    # valid_tags = candidate_contours
+    print(f"DEBUG: Filtered down to {len(valid_tags)} valid shapes.")
 
-    # F. DRAWING (RED FILL)
+    # E. DRAWING (RED FILL)
     output_frame = frame.copy()
     red_color = (0, 0, 255) # BGR
     
-    for tag in candidate_contours:
-        # 'tag' is now just the numpy array of coordinates
+    for tag in valid_tags:
+        # 'tag' is a numpy array of coordinates
         
-        # Upscale coordinates (if resizing_factor > 1)
+        # 1. Upscale coordinates to match original 1080p frame
         upscaled_tag = tag * resizing_factor
         
-        # Convert to standard OpenCV format: (N, 1, 2)
-        # FLIP [row, col] -> [x, y] for OpenCV drawing
+        # 2. Convert to standard OpenCV format: (N, 1, 2)
+        # FLIP [row, col] -> [x, y] for OpenCV drawing functions
         pts = upscaled_tag[:, ::-1].astype(np.int32)
         pts = pts.reshape((-1, 1, 2))
         
-        # Draw
+        # 3. Draw the shape
         cv2.polylines(output_frame, [pts], isClosed=True, color=red_color, thickness=5)
             
     return output_frame
-
 
 
 def gaussian_blur(image, kernel_size=5, sigma=1.0):
@@ -544,147 +569,88 @@ def minimum_filter(image):
     p4 = padded[1:-1, 2:] 
     return np.minimum.reduce([p0, p1, p2, p3, p4])
 
-def extract_contours_hierarchical(binary_image, level=0):
-    """
-    Recursive function to find contours and their children (holes).
+def extract_contours_from_gradient(edge_image):
+    contours = []
+    h, w = edge_image.shape
+    visited_mask = np.zeros((h, w), dtype=bool)
     
-    Args:
-        binary_image: 0 (Black Object) and 255 (White Background).
-        level: Depth of recursion (0=Outermost, 1=Hole, 2=Inside Hole, etc.)
-    
-    Returns:
-        List of tuples: (contour_coords, children_list, hierarchy_level)
-    """
-    
-    # Base case: Image is too small or empty
-    if binary_image.shape[0] < 3 or binary_image.shape[1] < 3:
-        return []
+    # Get all white pixels
+    candidate_points = np.argwhere(edge_image == 255)
 
-    hierarchy = []
-    h, w = binary_image.shape
-    
-    # Work copy to erase shapes as we find them
-    # Crucial: We only erase from THIS level's search, not the original data
-    work_image = binary_image.copy()
-
-    # --- OPTIMIZATION: Candidate Selection (from previous turn) ---
-    is_black = (work_image == 0)
-    is_white = (work_image == 255)
-    w_pad = np.pad(is_white, pad_width=1, mode='constant', constant_values=False)
-    has_white_neighbor = (w_pad[0:-2, 1:-1] | w_pad[2:, 1:-1] | 
-                          w_pad[1:-1, 0:-2] | w_pad[1:-1, 2:])
-    boundary_mask = is_black & has_white_neighbor
-    boundary_points = np.argwhere(boundary_mask)
-    # -------------------------------------------------------------
-
-    for start_point in boundary_points:
+    for start_point in candidate_points:
         y, x = start_point
+        if visited_mask[y, x]: continue
+            
+        # Trace line
+        contour = trace_line_directional(edge_image, tuple(start_point), visited_mask)
         
-        # Check if already processed/erased
-        if work_image[y, x] == 255: continue
+        if len(contour) > 10:
+            contours.append(contour)
+            
+    return contours
 
-        # 1. Trace the Outer Contour
-        contour = moore_neighbour_trace(work_image, start_point)
-        
-        if contour is None or len(contour) < 3:
-            work_image[y, x] = 255 # clear noise
-            continue
-
-        # 2. Create a Mask for this specific shape
-        # We need a blank canvas to paint ONLY this shape
-        shape_mask = np.zeros((h, w), dtype=np.uint8)
-        
-        # Use fillPoly to create a solid mask of the contour
-        # This fills the "Interior" of the contour with 255
-        # Note: cv2.fillPoly expects (x,y), numpy uses (y,x). Flip cols for drawing.
-        cv2.fillPoly(shape_mask, [np.fliplr(contour)], 255)
-        
-        # 3. Extract the "Interior" from the Original Image
-        # logical_and gets us the original pixels, but ONLY where the mask is white
-        # This captures the "holes" inside the shape.
-        interior_view = np.full((h, w), 255, dtype=np.uint8) # Default white background
-        
-        # Where the mask is valid, copy data from the ORIGINAL binary_image
-        # But we need to INVERT it. 
-        # Why? Because 'extract_contours' looks for BLACK objects.
-        # The 'holes' inside our current black object are WHITE.
-        # To find them, we must turn them BLACK.
-        
-        mask_bool = (shape_mask == 255)
-        
-        # If original was 255 (hole), it becomes 0 (target). 
-        # If original was 0 (solid part), it becomes 255 (background).
-        interior_view[mask_bool] = 255 - binary_image[mask_bool]
-
-        # 4. Erase this contour from the CURRENT level (so we don't find it again)
-        # We set the pixels of this shape to 255 (White/Background) in work_image
-        work_image[mask_bool] = 255
-
-        # 5. RECURSION: Look for contours inside this shape
-        # Pass the inverted interior view.
-        children = extract_contours_hierarchical(interior_view, level + 1)
-        
-        hierarchy.append({
-            'contour': contour,
-            'children': children,
-            'level': level
-        })
-        
-    return hierarchy
-
-def moore_neighbour_trace(binary_image, start_point):
+def trace_line_directional(edge_image, start_point, visited_mask):
     """
-    Guaranteed to exit. Includes a hard safety limit to prevent freezing.
+    Traces a 1-pixel thick line by prioritizing neighbors that continue 
+    the current direction, preventing diagonal short-circuits.
     """
-    # Pad with White (255)
-    padded_image = np.pad(binary_image, pad_width=1, mode="constant", constant_values=255)
-    
-    offsets = np.array([[-1, 0], [-1, 1], [0, 1], [1, 1], [1, 0], [1, -1], [0, -1], [-1, -1]])
-    
+    h, w = edge_image.shape
     contour = []
+    curr_y, curr_x = start_point
     
-    # Shift start point to Padded World
-    current_point = start_point.copy() + 1
-    start_padded = current_point.copy()
+    contour.append([curr_y, curr_x])
+    visited_mask[curr_y, curr_x] = True
     
-    backtrack_idx = 0
+    # Initial arbitrary direction (doesn't matter for first step)
+    # 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
+    current_dir = 0 
     
-    # SAFETY: Stop after this many pixels. 
-    # (A 480p image perimeter is ~2000 pixels. 10k is plenty.)
-    max_steps = 10000 
+    # Standard 8-connected offsets
+    offsets = [(-1, 0), (-1, 1), (0, 1), (1, 1), 
+               (1, 0), (1, -1), (0, -1), (-1, -1)]
+    
+    max_steps = 10000
     steps = 0
-
+    
     while True:
         steps += 1
-        if steps > max_steps:
-            # FORCE BREAK: Prevent infinite loop
-            break
-
-        # Save Real World Coordinate
-        contour.append(current_point - 1)
-        
-        # Search neighbors
-        search_indices = (np.arange(8) + backtrack_idx) % 8
-        neighbor_coords = current_point + offsets[search_indices]
-        neighbor_vals = padded_image[neighbor_coords[:, 0], neighbor_coords[:, 1]]
-        
-        is_black = (neighbor_vals == 0)
-        
-        # If isolated pixel (no neighbors), stop.
-        if not np.any(is_black):
-            break
+        if steps > max_steps: break
             
-        # Move to first black neighbor
-        found_local = np.argmax(is_black)
-        found_global = search_indices[found_local]
+        found_next = False
         
-        current_point = current_point + offsets[found_global]
-        backtrack_idx = (found_global + 5) % 8
+        # SEARCH STRATEGY: 
+        # Start looking from the "Forward-Left" neighbor relative to current direction.
+        # This acts like a "Left-Hand Rule" wall follower.
+        # It ensures we follow the outer edge of the line.
         
-        # STOPPING CONDITION
-        # If we are back at the start coordinates
-        if (current_point[0] == start_padded[0] and 
-            current_point[1] == start_padded[1]):
+        # If moving North (0), we check NW(7), N(0), NE(1)...
+        start_search_idx = (current_dir + 6) % 8 
+        
+        for i in range(8):
+            # Check neighbors in Clockwise order
+            idx = (start_search_idx + i) % 8
+            dy, dx = offsets[idx]
+            ny, nx = curr_y + dy, curr_x + dx
+            
+            if 0 <= ny < h and 0 <= nx < w:
+                # Is it part of the line?
+                if edge_image[ny, nx] == 255:
+                    
+                    # 1. New Pixel?
+                    if not visited_mask[ny, nx]:
+                        curr_y, curr_x = ny, nx
+                        contour.append([curr_y, curr_x])
+                        visited_mask[curr_y, curr_x] = True
+                        current_dir = idx # Update direction
+                        found_next = True
+                        break
+                    
+                    # 2. Closed Loop?
+                    # Only close if we hit start point AND line is long enough
+                    elif ny == start_point[0] and nx == start_point[1] and len(contour) > 10:
+                        return np.array(contour)
+        
+        if not found_next:
             break
             
     return np.array(contour)
@@ -718,71 +684,6 @@ def fill_contour(binary_image, contour):
             # We add +1 to max_x because numpy slicing is exclusive at the end
             binary_image[y, min_x : max_x + 1] = 255
 
-
-def extract_contours(binary_image):
-    """
-    Extracts all the contours within a binary_image as a list of coordinates.
-    Optimized: Only iterates over boundary pixels (black pixels with white neighbors).
-    
-    :param binary_image: NumPy 2D array of 0 (blacks) and 255 (White).
-    """
-    contours = []
-    h, w = binary_image.shape
-    
-    # Work on a copy to allow filling/erasing shapes
-    work_image = binary_image.copy()
-
-    # --- OPTIMIZATION START ---
-    # We want to find pixels that are:
-    # 1. BLACK (0)
-    # 2. Have at least one WHITE (255) neighbor
-    
-    # Boolean masks
-    is_black = (work_image == 0)
-    is_white = (work_image == 255)
-    
-    # Check 4-neighbors (Up, Down, Left, Right) using slicing/padding
-    # Pad the white mask with False (treat border as non-white/black boundary)
-    # or True (treat border as white/background). 
-    # Usually, for contouring, treating the border as background ensures objects touching the edge are detected.
-    w_pad = np.pad(is_white, pad_width=1, mode='constant', constant_values=False)
-    
-    # Shift padded array to check neighbors
-    # If a pixel's North neighbor is White, w_pad[y, x+1] (shifted down relative to center) is True.
-    has_white_neighbor = (
-        w_pad[0:-2, 1:-1] |  # North neighbor is White
-        w_pad[2:,   1:-1] |  # South neighbor is White
-        w_pad[1:-1, 0:-2] |  # West neighbor is White
-        w_pad[1:-1, 2:]      # East neighbor is White
-    )
-    
-    # The Candidates: Must be Black AND have a White Neighbor
-    boundary_mask = is_black & has_white_neighbor
-    
-    # Get coordinates of all True values in boundary_mask
-    # np.argwhere returns a list of [y, x] coordinates
-    boundary_points = np.argwhere(boundary_mask)
-    # --- OPTIMIZATION END ---
-
-    for start_point in boundary_points:
-        y, x = start_point
-        
-        # Is this pixel still black?
-        # Even though we pre-calculated boundary_points, 'fill_contour' might have
-        # erased this pixel if it belonged to a shape we processed in a previous iteration.
-        if work_image[y, x] == 255: 
-            continue
-
-        contour = moore_neighbour_trace(work_image, start_point)
-
-        if contour is not None and len(contour) > 2:
-            contours.append(contour)
-            fill_contour(work_image, contour)
-        else:
-            # Error handling: single pixel noise
-            work_image[y, x] = 255
-            
-    return contours
 
 def filter_contours(contours, min_area=50):
     """

@@ -63,3 +63,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python3 main.py --video "assets/videos_and_intrinsics/multipleTags.mp4"
+# python3 main.py --image "assets/test.png"

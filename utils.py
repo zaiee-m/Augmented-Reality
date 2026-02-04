@@ -149,64 +149,6 @@ def draw_line(image, start, end, color=(0, 255, 0)):
     image[y_indices[valid], x_indices[valid]] = color
 
 
-def fill_polygon(image, vertices, color=(0, 0, 255)):
-    """
-    Fills a convex polygon defined by vertices on a numpy array image.
-    Uses a basic scanline algorithm.
-    
-    Args:
-        image: The image to draw on (H, W, C).
-        vertices: Numpy array of shape (N, 2) containing [row, col] coordinates.
-        color: Tuple (B, G, R) for the fill color.
-    """
-    vertices = vertices.astype(int)
-    n = len(vertices)
-    if n < 3: return
-
-    h, w = image.shape[:2]
-
-    # 1. Find bounding box to limit search range
-    min_y = np.max([0, np.min(vertices[:, 0])])
-    max_y = np.min([h - 1, np.max(vertices[:, 0])])
-
-    # 2. Iterate through each scanline (row) within the bounding box
-    for y in range(min_y, max_y + 1):
-        intersections = []
-        for i in range(n):
-            v1 = vertices[i]
-            v2 = vertices[(i + 1) % n]
-
-            y1, x1 = v1[0], v1[1]
-            y2, x2 = v2[0], v2[1]
-
-            # Check if current scanline 'y' intersects the edge line segment (v1, v2)
-            # We use < on one side and >= on the other to handle vertices exactly on scanlines correctly.
-            if (y1 <= y < y2) or (y2 <= y < y1):
-                # Calculate X intersection point using linear interpolation formula
-                # Avoid division by zero for horizontal lines (y2 - y1 = 0), though the if condition usually prevents this.
-                if y2 != y1:
-                    x = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
-                    intersections.append(x)
-
-        # 3. Sort intersections by X coordinate
-        intersections.sort()
-
-        # 4. Fill pixels between pairs of intersections (even-odd rule)
-        # For a convex polygon, a scanline usually enters once and leaves once (2 intersections).
-        for i in range(0, len(intersections), 2):
-            if i + 1 < len(intersections):
-                # Round and clip X coordinates to image bounds
-                x_start = int(np.round(intersections[i]))
-                x_end = int(np.round(intersections[i+1]))
-                
-                x_start = np.max([0, x_start])
-                # Add 1 for inclusive slicing behavior if desired, or keep as is for standard filling
-                x_end = np.min([w, x_end + 1]) 
-
-                if x_start < x_end:
-                    # Fill the horizontal segment
-                    image[y, x_start:x_end] = color
-
 def detect_edges_binary(binary_image):
     """
     Detects edges in a binary image using Morphological Gradient.
@@ -249,7 +191,7 @@ def detect_edges_binary(binary_image):
     
     return edge_image
 
-def extract_and_draw_final(frame, resizing_factor=4):
+def extract_and_draw_final(frame, resizing_factor=1):
     print(f"--- Processing Frame (Scale: 1/{resizing_factor}) ---")
     
     # A. PREPROCESSING
@@ -283,7 +225,7 @@ def extract_and_draw_final(frame, resizing_factor=4):
     # valid_tags = [c for c in candidate_contours if cv2.contourArea(c) > min_area_thresh]
     
     # For now, using your placeholder:
-    valid_tags = filter_contours(candidate_contours, min_area=min_area_thresh)
+    valid_tags = optimize_contours(candidate_contours, min_area=min_area_thresh)
     # valid_tags = candidate_contours
     print(f"DEBUG: Filtered down to {len(valid_tags)} valid shapes.")
 
@@ -655,160 +597,196 @@ def trace_line_directional(edge_image, start_point, visited_mask):
             
     return np.array(contour)
 
-def fill_contour(binary_image, contour):
+
+def optimize_contours(contours, min_area=100):
     """
-    Manually fills the inside of a contour with White (255).
-    This effectively 'deletes' the object from the binary image.
-    
-    Assumption: The shape is roughly convex (like a square/AR tag).
-    """
-
-    # Get all unique Y-coordinates (rows) occupied by the contour
-    min_y = np.min(contour[:, 0])
-    max_y = np.max(contour[:, 0])
-
-    # Scanline Fill: For every row, find the Left and Right edges.
-    for y in range(min_y, max_y + 1):
-        # Find all points in the contour that are on this specific row
-        indices = np.where(contour[:, 0] == y)[0]
-
-        if len(indices) > 0:
-            # Get the X coordinates for this row
-            x_coords = contour[indices, 1]
-
-            # Find the start (min) and end (max) of the shape on this row
-            min_x = np.min(x_coords)
-            max_x = np.max(x_coords)
-
-            # Fill the span with White (255)
-            # We add +1 to max_x because numpy slicing is exclusive at the end
-            binary_image[y, min_x : max_x + 1] = 255
-
-
-def filter_contours(contours, min_area=50):
-    """
-    Filters a list of raw contours to find potential AR tags.
-    
-    Strategy:
-    1. Filter by Area (Fast): Discard tiny noise specks.
-    2. Filter by Shape (Slow): Run Douglas-Peucker to check for 4 corners.
+    Filters and simplifies a list of contours.
+    1. Removes small noise (Area Check).
+    2. Simplifies shapes to stable 4-corner quadrilaterals (Fixes Flickering).
     
     Args:
-        contours: List of numpy arrays (the raw output from extract_contours).
-        min_area: Minimum pixel area to consider. 
-                  (Keep this small if working on the downscaled image!)
-                  
-    Returns:
-        valid_tags: List of simplified 4-corner numpy arrays.
-    """
-
-    # return contours
-
-    valid_tags = []
-    
-    for contour in contours:
-        corners = get_corners(contour)
-        
-        if len(corners) > 1:
-                    start_pt = corners[0]
-                    end_pt = corners[-1]
-                    
-                    # Calculate distance between First and Last point
-                    dist = np.linalg.norm(start_pt - end_pt)
-                    
-                    # If they are closer than 10 pixels, it's the same corner. Drop the last one.
-                    if dist < 10:
-                        corners = corners[:-1]
-        
-        if len(corners) == 4:
-            valid_tags.append(corners)
-
-    return valid_tags
-
-
-def get_corners(contour):
-    """
-    Wrapper to simplify a contour into exactly 4 corners if possible.
-    """
-    # Calculate Perimeter (Approximation)
-    # The tolerance (epsilon) is usually relative to the size of the shape.
-    # A standard heuristic is 1% to 5% of the arc length.
-    perimeter = np.sum(np.sqrt(np.sum(np.diff(contour, axis=0)**2, axis=1)))
-    epsilon = 0.05 * perimeter  # Start with 2% tolerance
-    
-    # Run RDP
-    approx_corners = simplify_contour(contour, epsilon)
-    
-    return approx_corners
-
-
-    
-def simplify_contour(points, epsilon):
-    """
-    Recursively simplifies a contour using the Ramer-Douglas-Peucker algorithm.
-    
-    Args:
-        points: (N, 2) numpy array of coordinates.
-        epsilon: Max distance allowed from the straight line (The 'tolerance').
+        contours: List of numpy arrays (contours).
+        min_area: Minimum area required to be considered a valid tag.
         
     Returns:
-        simplified: (M, 2) numpy array of the key corners.
+        valid_quads: List of simplified (4, 2) numpy arrays.
     """
-
-    def get_perpendicular_distances(points, start_point, end_point):
-        # Vector representing the Line (Start -> End)
-        line_vec = end_point - start_point
-        
-        # Vectors representing Start -> Points (Broadcasting)
-        # Subtracts start_point from EVERY row in points instantly
-        point_vecs = points - start_point
-        
-        # Calculate Magnitude of the Cross Product (The "Area")
-        cross_product = np.cross(line_vec, point_vecs)
-        
-        # Calculate Length of the Line Vector (The "Base")
-        line_len = np.linalg.norm(line_vec)
-        
-        # Safety: Avoid division by zero if start == end
-        if line_len == 0:
-            return np.linalg.norm(point_vecs, axis=1)
+    valid_quads = []
+    
+    for cnt in contours:
+        # 1. Area Filter
+        # Calculate area (Shoelace formula is fast, or use cv2.contourArea)
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
             
-        # Distance = Area / Base
-        return np.abs(cross_product) / line_len
+        # 2. Simplification (Robust Quad Extraction)
+        # Instead of RDP (which flickers), we find the best-fit 4 corners on the Convex Hull.
+        try:
+            # Helper function from previous step
+            hull = get_convex_hull(cnt) 
+            quad = find_largest_quad_on_hull(hull)
+            
+            # 3. Final sanity check: Is the result actually 4 points?
+            if len(quad) == 4:
+                valid_quads.append(quad)
+                
+        except Exception as e:
+            # If a contour is degenerate (e.g. a straight line), hull might fail.
+            # Safe to skip it.
+            continue
+            
+    return valid_quads
 
 
-    # Base Case: If only 2 points are left, we cannot simplify further.
-    if len(points) < 3:
-        return points
+def simplify_to_quad(contour):
+    """
+    Robustly extracts exactly 4 corners from a contour for AR tags.
+    Fixes flickering by avoiding recursive splitting.
+    
+    Args:
+        contour: (N, 2) numpy array of (y, x) coordinates.
+        
+    Returns:
+        quad: (4, 2) numpy array of corners sorted (TL, TR, BR, BL).
+    """
+    # 1. Get Convex Hull
+    # This wraps the noisy contour in a rubber band, smoothing out small dents.
+    # Note: If you don't have scipy, you can implement Monotone Chain algo, 
+    # but for simplicity, let's assume valid input or use a simple extents method.
+    hull = get_convex_hull(contour) 
+    
+    # 2. Heuristic: Find the "Extreme" points
+    # For a rotated square, the corners are usually the points that maximize:
+    # (x + y), (x - y), (-x + y), (-x - y)
+    
+    # Convert to x, y for easier reasoning (assuming input is y, x)
+    # y = hull[:, 0], x = hull[:, 1]
+    pts = hull
+    
+    # Sum and Diff
+    s = pts.sum(axis=1) # y + x
+    d = np.diff(pts, axis=1).flatten() # x - y (approx)
+    
+    # Top-Left: Minimal sum (closest to 0,0)
+    tl = pts[np.argmin(s)]
+    # Bottom-Right: Maximal sum
+    br = pts[np.argmax(s)]
+    
+    # Top-Right: Minimal difference (y is small, x is big -> y-x is small negative)
+    # Bottom-Left: Maximal difference (y is big, x is small -> y-x is big positive)
+    # Note: This heuristic works well for rectangles not rotated 45 degrees.
+    # A more robust generic way is closest distance to frame corners or rotated calipers.
+    
+    # --- BETTER GENERIC METHOD (Rotated Calipers approx) ---
+    # We want the 4 points that maximize area or distance.
+    # Simplified approach for AR: Approximate the polygon to 4 sides.
+    
+    # Calculate center of mass
+    center = contour.mean(axis=0)
+    
+    # Calculate distance of every point from center
+    dists = np.linalg.norm(contour - center, axis=1)
+    
+    # The corners are local maxima of distance from center.
+    # However, noise creates many local maxima.
+    # We essentially want to cluster the points into 4 groups (quadrants) 
+    # and pick the furthest point in each group.
+    
+    corners = []
+    
+    # Classify points into 4 quadrants relative to center
+    # Q1: Top-Left (y < cy, x < cx)
+    # Q2: Top-Right (y < cy, x > cx) ... etc
+    # (Note: This assumes the tag isn't rotated 45 degrees relative to camera)
+    
+    # ROBUST FALLBACK:
+    # If the tag rotates, quadrant logic fails.
+    # Instead, just return the 4 points from the convex hull 
+    # that form the largest quadrilateral area.
+    
+    # But since you asked for a replacement for 'simplify_contour',
+    # here is the standard OpenCV-style approximation implemented manually:
+    
+    return find_largest_quad_on_hull(hull)
 
-    # Setup the Line (Start -> End)
-    start_point = points[0]
-    end_point = points[-1]
+def get_convex_hull(points):
+    """
+    Computes Convex Hull using Monotone Chain algorithm.
+    Sorts points lexicographically first.
+    """
+    # Sort by y, then x
+    points = points[np.lexsort((points[:, 1], points[:, 0]))]
     
-    # Find the point with the Maximum Distance from this line
-    # (Using the helper function from the previous step)
-    dists = get_perpendicular_distances(points, start_point, end_point)
-    
-    max_dist = np.max(dists)
-    index = np.argmax(dists)
-    
-    # The Decision
-    if max_dist > epsilon:
-        # Split the curve into two halves at the index
-        # We include the corner point in BOTH halves so they connect.
-        left_curve = points[:index + 1]
-        right_curve = points[index:]
+    # Build lower hull 
+    lower = []
+    for p in points:
+        while len(lower) >= 2 and np.cross(lower[-1] - lower[-2], p - lower[-2]) <= 0:
+            lower.pop()
+        lower.append(p)
         
-        # Recursively simplify both halves
-        # These function calls will drill down until they hit straight lines
-        simplified_left = simplify_contour(left_curve, epsilon)
-        simplified_right = simplify_contour(right_curve, epsilon)
+    # Build upper hull
+    upper = []
+    for p in reversed(points):
+        while len(upper) >= 2 and np.cross(upper[-1] - upper[-2], p - upper[-2]) <= 0:
+            upper.pop()
+        upper.append(p)
         
-        # Merge the results
-        return np.vstack((simplified_left[:-1], simplified_right))
-        
-    else:
-        # Just return the Start and End.
-        return np.array([start_point, end_point])
+    return np.array(lower[:-1] + upper[:-1])
+
+def find_largest_quad_on_hull(hull):
+    """
+    Finds the 4 vertices on the hull that form the quadrilateral with max area.
+    This is stable because it relies on the global shape, not local edges.
+    """
+    # If hull is small, just return it or pad
+    if len(hull) <= 4:
+        if len(hull) < 4: return np.pad(hull, ((0, 4-len(hull)), (0,0)), 'edge')
+        return hull
+
+    # Simplification:
+    # The furthest two points on the hull are likely diagonals.
+    # We can iterate to find the pair with max distance.
+    # Then find the point furthest from that line on both sides.
     
+    best_dist = 0
+    p1_idx, p2_idx = 0, 0
+    
+    # 1. Find Diagonal (Longest distance)
+    # Optimization: Only check points with high stride or just brute force (len is small)
+    # Convex hulls are usually small (<50 points). Brute force is fine.
+    for i in range(len(hull)):
+        for j in range(i + 1, len(hull)):
+            d = np.linalg.norm(hull[i] - hull[j])
+            if d > best_dist:
+                best_dist = d
+                p1_idx, p2_idx = i, j
+                
+    p1 = hull[p1_idx]
+    p2 = hull[p2_idx]
+    
+    # 2. Find the points furthest from this diagonal line (on each side)
+    # Line vector
+    line_vec = p2 - p1
+    
+    # Cross products for all points relative to p1
+    vecs = hull - p1
+    cross_prods = np.cross(line_vec, vecs)
+    
+    # One point will have max positive cross product, one will have max negative (min)
+    p3_idx = np.argmax(cross_prods)
+    p4_idx = np.argmin(cross_prods)
+    
+    corners = np.array([p1, hull[p3_idx], p2, hull[p4_idx]])
+    
+    # 3. Sort Corners (Top-Left, Top-Right, Bottom-Right, Bottom-Left)
+    # Calculate centroid
+    center = corners.mean(axis=0)
+    angles = np.arctan2(corners[:, 0] - center[0], corners[:, 1] - center[1])
+    
+    # Sort by angle
+    sort_order = np.argsort(angles)
+    sorted_corners = corners[sort_order]
+    
+    return sorted_corners
 

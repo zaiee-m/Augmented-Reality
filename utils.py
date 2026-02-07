@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import math
+import customCV
 
 def generate_tag(cell_size=50, tag_id=0):
     """
@@ -191,28 +192,35 @@ def detect_edges_binary(binary_image):
     
     return edge_image
 
-def extract_and_draw_final(frame, resizing_factor=1):
+def extract_and_draw_final(frame, resizing_factor=3):
     print(f"--- Processing Frame (Scale: 1/{resizing_factor}) ---")
     
     # A. PREPROCESSING
     # Downscale for speed (Processing 1080p is unnecessary for detection)
     small_frame = fast_scale(frame, scale_factor=resizing_factor)
+    
     grey = to_grayscale(small_frame)
     
-    # Gaussian Blur (or use fast_box_blur if you implemented it)
-    blurred = gaussian_blur(grey, kernel_size=9, sigma=2.0)
+    blurred = np.empty_like(grey)
 
-    # B. BINARIZATION
-    # Using your optimized global/Otsu thresholding
+    # Gaussian Blur (or use fast_box_blur if you implemented it)
+    customCV.gaussian_blur(grey, blurred, 5, 2.0)
+
+    # return blurred 
+
     binary = binarization(blurred)
     
     gradient =  detect_edges_binary(binary)
+
+    # return binary
     # C. EXTRACT CONTOURS (Optimized Flat Version)
     # The function you defined now uses 'visited_map' and candidate selection.
     # It returns a simple list of arrays, so we don't need a hierarchy stack.
     print("DEBUG: Extracting contours...")
     candidate_contours = extract_contours_from_gradient(gradient)
     print(f"DEBUG: Found {len(candidate_contours)} total contours.")
+
+    # return binary
 
     # return gradient
     # return binary    
@@ -225,7 +233,10 @@ def extract_and_draw_final(frame, resizing_factor=1):
     # valid_tags = [c for c in candidate_contours if cv2.contourArea(c) > min_area_thresh]
     
     # For now, using your placeholder:
-    valid_tags = optimize_contours(candidate_contours, min_area=min_area_thresh)
+    valid_tags = customCV.find_quads(candidate_contours, min_area_thresh)
+
+    # return binary
+
     # valid_tags = candidate_contours
     print(f"DEBUG: Filtered down to {len(valid_tags)} valid shapes.")
 
@@ -248,53 +259,6 @@ def extract_and_draw_final(frame, resizing_factor=1):
         cv2.polylines(output_frame, [pts], isClosed=True, color=red_color, thickness=5)
             
     return output_frame
-
-
-def gaussian_blur(image, kernel_size=5, sigma=1.0):
-    """
-    Apply Gaussian blur using 1D separable convolution with vectorization.
-    Speedup: ~100x compared to pixel-wise loops.
-    """
-    # 1. Create 1D Gaussian Kernel
-    ax = np.arange(-kernel_size // 2 + 1., kernel_size // 2 + 1.)
-    kernel_1d = np.exp(-(ax**2) / (2. * sigma**2))
-    kernel_1d /= kernel_1d.sum()
-    
-    # 2. Prepare for Vectorized Convolution
-    h, w = image.shape
-    pad = kernel_size // 2
-    
-    # We work with floats for precision
-    img_float = image.astype(np.float32)
-    
-    # --- Horizontal Pass ---
-    # Pad Left/Right only
-    padded_h = np.pad(img_float, ((0, 0), (pad, pad)), mode='edge')
-    blurred_h = np.zeros_like(img_float)
-    
-    # Vectorized "Shift & Add"
-    # Instead of looping pixels, we loop through the kernel elements.
-    # We take slices of the padded image corresponding to the shift.
-    for k in range(kernel_size):
-        # Slice the padded image to get a shifted view of size (H, W)
-        # If k=0, we take the leftmost slice. If k=kernel_size-1, the rightmost.
-        shifted_view = padded_h[:, k : k + w]
-        
-        # Accumulate: Result += Image_Slice * Kernel_Weight
-        blurred_h += shifted_view * kernel_1d[k]
-
-    # --- Vertical Pass ---
-    # Pad Top/Bottom only (on the result of the horizontal pass)
-    padded_v = np.pad(blurred_h, ((pad, pad), (0, 0)), mode='edge')
-    blurred_v = np.zeros_like(blurred_h)
-    
-    for k in range(kernel_size):
-        # Slice vertically
-        shifted_view = padded_v[k : k + h, :]
-        blurred_v += shifted_view * kernel_1d[k]
-        
-    return blurred_v.astype(np.uint8)
-
 
 
 def binarization(gray_image):
@@ -596,197 +560,3 @@ def trace_line_directional(edge_image, start_point, visited_mask):
             break
             
     return np.array(contour)
-
-
-def optimize_contours(contours, min_area=100):
-    """
-    Filters and simplifies a list of contours.
-    1. Removes small noise (Area Check).
-    2. Simplifies shapes to stable 4-corner quadrilaterals (Fixes Flickering).
-    
-    Args:
-        contours: List of numpy arrays (contours).
-        min_area: Minimum area required to be considered a valid tag.
-        
-    Returns:
-        valid_quads: List of simplified (4, 2) numpy arrays.
-    """
-    valid_quads = []
-    
-    for cnt in contours:
-        # 1. Area Filter
-        # Calculate area (Shoelace formula is fast, or use cv2.contourArea)
-        area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
-            
-        # 2. Simplification (Robust Quad Extraction)
-        # Instead of RDP (which flickers), we find the best-fit 4 corners on the Convex Hull.
-        try:
-            # Helper function from previous step
-            hull = get_convex_hull(cnt) 
-            quad = find_largest_quad_on_hull(hull)
-            
-            # 3. Final sanity check: Is the result actually 4 points?
-            if len(quad) == 4:
-                valid_quads.append(quad)
-                
-        except Exception as e:
-            # If a contour is degenerate (e.g. a straight line), hull might fail.
-            # Safe to skip it.
-            continue
-            
-    return valid_quads
-
-
-def simplify_to_quad(contour):
-    """
-    Robustly extracts exactly 4 corners from a contour for AR tags.
-    Fixes flickering by avoiding recursive splitting.
-    
-    Args:
-        contour: (N, 2) numpy array of (y, x) coordinates.
-        
-    Returns:
-        quad: (4, 2) numpy array of corners sorted (TL, TR, BR, BL).
-    """
-    # 1. Get Convex Hull
-    # This wraps the noisy contour in a rubber band, smoothing out small dents.
-    # Note: If you don't have scipy, you can implement Monotone Chain algo, 
-    # but for simplicity, let's assume valid input or use a simple extents method.
-    hull = get_convex_hull(contour) 
-    
-    # 2. Heuristic: Find the "Extreme" points
-    # For a rotated square, the corners are usually the points that maximize:
-    # (x + y), (x - y), (-x + y), (-x - y)
-    
-    # Convert to x, y for easier reasoning (assuming input is y, x)
-    # y = hull[:, 0], x = hull[:, 1]
-    pts = hull
-    
-    # Sum and Diff
-    s = pts.sum(axis=1) # y + x
-    d = np.diff(pts, axis=1).flatten() # x - y (approx)
-    
-    # Top-Left: Minimal sum (closest to 0,0)
-    tl = pts[np.argmin(s)]
-    # Bottom-Right: Maximal sum
-    br = pts[np.argmax(s)]
-    
-    # Top-Right: Minimal difference (y is small, x is big -> y-x is small negative)
-    # Bottom-Left: Maximal difference (y is big, x is small -> y-x is big positive)
-    # Note: This heuristic works well for rectangles not rotated 45 degrees.
-    # A more robust generic way is closest distance to frame corners or rotated calipers.
-    
-    # --- BETTER GENERIC METHOD (Rotated Calipers approx) ---
-    # We want the 4 points that maximize area or distance.
-    # Simplified approach for AR: Approximate the polygon to 4 sides.
-    
-    # Calculate center of mass
-    center = contour.mean(axis=0)
-    
-    # Calculate distance of every point from center
-    dists = np.linalg.norm(contour - center, axis=1)
-    
-    # The corners are local maxima of distance from center.
-    # However, noise creates many local maxima.
-    # We essentially want to cluster the points into 4 groups (quadrants) 
-    # and pick the furthest point in each group.
-    
-    corners = []
-    
-    # Classify points into 4 quadrants relative to center
-    # Q1: Top-Left (y < cy, x < cx)
-    # Q2: Top-Right (y < cy, x > cx) ... etc
-    # (Note: This assumes the tag isn't rotated 45 degrees relative to camera)
-    
-    # ROBUST FALLBACK:
-    # If the tag rotates, quadrant logic fails.
-    # Instead, just return the 4 points from the convex hull 
-    # that form the largest quadrilateral area.
-    
-    # But since you asked for a replacement for 'simplify_contour',
-    # here is the standard OpenCV-style approximation implemented manually:
-    
-    return find_largest_quad_on_hull(hull)
-
-def get_convex_hull(points):
-    """
-    Computes Convex Hull using Monotone Chain algorithm.
-    Sorts points lexicographically first.
-    """
-    # Sort by y, then x
-    points = points[np.lexsort((points[:, 1], points[:, 0]))]
-    
-    # Build lower hull 
-    lower = []
-    for p in points:
-        while len(lower) >= 2 and np.cross(lower[-1] - lower[-2], p - lower[-2]) <= 0:
-            lower.pop()
-        lower.append(p)
-        
-    # Build upper hull
-    upper = []
-    for p in reversed(points):
-        while len(upper) >= 2 and np.cross(upper[-1] - upper[-2], p - upper[-2]) <= 0:
-            upper.pop()
-        upper.append(p)
-        
-    return np.array(lower[:-1] + upper[:-1])
-
-def find_largest_quad_on_hull(hull):
-    """
-    Finds the 4 vertices on the hull that form the quadrilateral with max area.
-    This is stable because it relies on the global shape, not local edges.
-    """
-    # If hull is small, just return it or pad
-    if len(hull) <= 4:
-        if len(hull) < 4: return np.pad(hull, ((0, 4-len(hull)), (0,0)), 'edge')
-        return hull
-
-    # Simplification:
-    # The furthest two points on the hull are likely diagonals.
-    # We can iterate to find the pair with max distance.
-    # Then find the point furthest from that line on both sides.
-    
-    best_dist = 0
-    p1_idx, p2_idx = 0, 0
-    
-    # 1. Find Diagonal (Longest distance)
-    # Optimization: Only check points with high stride or just brute force (len is small)
-    # Convex hulls are usually small (<50 points). Brute force is fine.
-    for i in range(len(hull)):
-        for j in range(i + 1, len(hull)):
-            d = np.linalg.norm(hull[i] - hull[j])
-            if d > best_dist:
-                best_dist = d
-                p1_idx, p2_idx = i, j
-                
-    p1 = hull[p1_idx]
-    p2 = hull[p2_idx]
-    
-    # 2. Find the points furthest from this diagonal line (on each side)
-    # Line vector
-    line_vec = p2 - p1
-    
-    # Cross products for all points relative to p1
-    vecs = hull - p1
-    cross_prods = np.cross(line_vec, vecs)
-    
-    # One point will have max positive cross product, one will have max negative (min)
-    p3_idx = np.argmax(cross_prods)
-    p4_idx = np.argmin(cross_prods)
-    
-    corners = np.array([p1, hull[p3_idx], p2, hull[p4_idx]])
-    
-    # 3. Sort Corners (Top-Left, Top-Right, Bottom-Right, Bottom-Left)
-    # Calculate centroid
-    center = corners.mean(axis=0)
-    angles = np.arctan2(corners[:, 0] - center[0], corners[:, 1] - center[1])
-    
-    # Sort by angle
-    sort_order = np.argsort(angles)
-    sorted_corners = corners[sort_order]
-    
-    return sorted_corners
-

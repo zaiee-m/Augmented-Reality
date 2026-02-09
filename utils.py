@@ -191,14 +191,13 @@ def detect_edges_binary(binary_image):
     return edge_image
 
 def extract_and_draw_final(frame, resizing_factor=3):
-    print(f"--- Processing Frame (Scale: 1/{resizing_factor}) ---")
     
     # --- A. PREPROCESSING ---
     # 1. Downscale for speed
-    
-    
+    small_frame = frame[::resizing_factor, ::resizing_factor]
+
     # 2. Grayscale
-    grey = to_grayscale(frame)
+    grey = to_grayscale(small_frame)
     
     # 3. Blur (Gaussian)
     blurred = np.empty_like(grey)
@@ -209,16 +208,12 @@ def extract_and_draw_final(frame, resizing_factor=3):
     binary = binarization(blurred)
     
     # return binary
-
-    small_binary = binary[::resizing_factor, ::resizing_factor]
     
     # 5. Edge Detection
-    gradient = detect_edges_binary(small_binary)
+    gradient = detect_edges_binary(binary)
 
     # --- B. EXTRACT CONTOURS ---
-    print("DEBUG: Extracting contours...")
     candidate_contours = extract_contours_from_gradient(gradient)
-    print(f"DEBUG: Found {len(candidate_contours)} total contours.")
     
     # --- C. GEOMETRIC FILTERING ---
     # Filter small noise based on resizing factor
@@ -231,7 +226,6 @@ def extract_and_draw_final(frame, resizing_factor=3):
     # This keeps valid tags and removes paper borders/data noise
     valid_tags = isolate_multiple_tags(quads)
     # valid_tags = quads
-    print(f"DEBUG: Filtered down to {len(valid_tags)} valid tags.")
 
     # --- D. DECODING & DRAWING ---
     output_frame = frame.copy()
@@ -245,12 +239,11 @@ def extract_and_draw_final(frame, resizing_factor=3):
         tag_full_xy = (tag * resizing_factor).astype(np.float32)
         # Flip [row, col] -> [x, y] for homography
         tag_full_xy = tag_full_xy[:, ::-1] 
-        print(tag_full_xy)
         
         # dst_pts = np.array([[144, 246], [171, 303], [240, 264], [210, 210]])
 
         # Pass the small binary image to read the bits
-        tag_id, angle = decode_tag_id(grey, tag_full_xy)
+        tag_id, angle = decode_tag_id(frame, tag_full_xy)
     
         # 2. PREPARE DRAWING COORDINATES
         # Upscale: Multiply by resizing factor to map back to 1080p
@@ -370,7 +363,7 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
     
     return final_frame
 
-def decode_tag_id(binary_image, corners):
+def decode_tag_id(frame, corners):
     """
     Robust decoding with Center Sampling and Adaptive Thresholding.
     """
@@ -384,11 +377,14 @@ def decode_tag_id(binary_image, corners):
     ], dtype=np.float32)
     
     rect = order_points(corners)
-    M = cv2.getPerspectiveTransform(rect, dst_pts)
+    M = get_perspective_transform(src=rect, dst=dst_pts)
     
     # Warp the image
-    warped = cv2.warpPerspective(binary_image, M, (size, size))
+    warped = warp_perspective_manual(frame, M, (size, size))
     
+    if len(warped.shape) == 3 and warped.shape[2] == 3:
+        warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
     # 2. CRITICAL FIX: Re-Threshold the Warped Tag
     # Sometimes lighting varies across the tag. We enforce strict Black/White
     # on the warped image itself. Otsu is safest here.
@@ -460,6 +456,97 @@ def decode_tag_id(binary_image, corners):
     tag_id = (bit1 << 3) | (bit2 << 2) | (bit3 << 1) | bit4
     
     return tag_id, orientation
+
+def warp_perspective_manual(img, M, dsize):
+    """
+    Manually applies a perspective transform (Homography) to an image.
+    Uses Nearest Neighbor interpolation for simplicity.
+    
+    Args:
+        img: Input image (H, W, C) or (H, W).
+        M: 3x3 Homography Matrix.
+        dsize: Tuple (width, height) of output image.
+        
+    Returns:
+        warped: The transformed image.
+    """
+    dst_w, dst_h = dsize
+    src_h, src_w = img.shape[:2]
+    
+    # 1. Create a Grid of Destination Coordinates (x', y')
+    # np.indices creates two grids: one for Y coordinates, one for X
+    # shape: (2, dst_h, dst_w)
+    y_grid, x_grid = np.indices((dst_h, dst_w))
+    
+    # 2. Flatten and Homogenize
+    # We need coordinates in the form [x', y', 1] for matrix multiplication
+    # shape: (3, N) where N is total pixels
+    ones = np.ones_like(x_grid)
+    dst_coords = np.stack([x_grid, y_grid, ones]).reshape(3, -1)
+    
+    # 3. Invert the Matrix
+    # We transform Dest -> Source, so we need inverse of M
+    try:
+        M_inv = np.linalg.inv(M)
+    except np.linalg.LinAlgError:
+        print("Error: Matrix is not invertible.")
+        return np.zeros((dst_h, dst_w, 3), dtype=np.uint8)
+
+    # 4. Map Coordinates (Matrix Multiplication)
+    # [x, y, w] = M_inv * [x', y', 1]
+    src_homo_coords = M_inv @ dst_coords
+    
+    # 5. Normalize Homogeneous Coordinates
+    # x = x_homo / w
+    # y = y_homo / w
+    w_vec = src_homo_coords[2, :]
+    
+    # Avoid division by zero
+    w_vec[w_vec == 0] = 1e-5
+    
+    src_x = src_homo_coords[0, :] / w_vec
+    src_y = src_homo_coords[1, :] / w_vec
+    
+    # 6. Nearest Neighbor Sampling
+    # Round float coordinates to nearest integer pixel
+    src_x = np.round(src_x).astype(int)
+    src_y = np.round(src_y).astype(int)
+    
+    # 7. Boundary Checks (Mask pixels that fall outside original image)
+    valid_mask = (
+        (src_x >= 0) & (src_x < src_w) & 
+        (src_y >= 0) & (src_y < src_h)
+    )
+    
+    # 8. Create Output Image
+    # Initialize black image
+    if len(img.shape) == 3:
+        warped = np.zeros((dst_h, dst_w, img.shape[2]), dtype=img.dtype)
+    else:
+        warped = np.zeros((dst_h, dst_w), dtype=img.dtype)
+        
+    # Only map valid pixels
+    # Reshape indices back to image dimensions (H, W) for assignment
+    # We assign values only where valid_mask is True
+    
+    # Flatten output to linear array for easy assignment
+    warped_flat = warped.reshape(-1, warped.shape[-1] if warped.ndim==3 else 1)
+    
+    # Linear indices of valid pixels
+    flat_indices = np.where(valid_mask)[0]
+    
+    # Sample from Source
+    # format: img[y, x]
+    if len(img.shape) == 3:
+        values = img[src_y[valid_mask], src_x[valid_mask]]
+        warped_flat[flat_indices] = values
+        warped = warped_flat.reshape(dst_h, dst_w, 3)
+    else:
+        values = img[src_y[valid_mask], src_x[valid_mask]]
+        warped_flat[flat_indices, 0] = values
+        warped = warped_flat.reshape(dst_h, dst_w)
+
+    return warped
 
 def get_perspective_transform(src, dst):
     """

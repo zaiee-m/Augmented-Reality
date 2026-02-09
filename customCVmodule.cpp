@@ -283,14 +283,12 @@ static PyObject* customCV_find_quads(PyObject* self, PyObject* args) {
 
     if (!PyArg_ParseTuple(args, "O|f", &contours_list, &min_area)) return NULL;
     if (!PyList_Check(contours_list)) {
-        PyErr_SetString(PyExc_TypeError, "contours must be a list");
         return NULL;
     }
 
     Py_ssize_t num_contours = PyList_Size(contours_list);
     PyObject* result_list = PyList_New(0);
     
-    printf("\n--- C++ DEBUG: Processing %zd contours ---\n", num_contours);
 
     for (Py_ssize_t i = 0; i < num_contours; i++) {
         PyObject* cnt_obj = PyList_GetItem(contours_list, i);
@@ -299,7 +297,6 @@ static PyObject* customCV_find_quads(PyObject* self, PyObject* args) {
         PyArrayObject* cnt_arr = (PyArrayObject*)PyArray_FROM_OTF(cnt_obj, NPY_INT32, NPY_ARRAY_IN_ARRAY | NPY_ARRAY_FORCECAST);
         
         if (!cnt_arr) {
-            printf("Contour %zd: INVALID (Not an array)\n", i);
             PyErr_Clear();
             continue;
         }
@@ -315,7 +312,6 @@ static PyObject* customCV_find_quads(PyObject* self, PyObject* args) {
         else if (ndim == 3 && dims[1] == 1 && dims[2] == 2) valid_shape = true;
 
         if (!valid_shape) {
-            printf("Contour %zd: REJECTED (Bad Shape: %d dims)\n", i, ndim);
             Py_DECREF(cnt_arr);
             continue;
         }
@@ -345,13 +341,11 @@ static PyObject* customCV_find_quads(PyObject* self, PyObject* args) {
         std::vector<Point> hull = get_convex_hull(pts);
 
         if (hull.size() < 4) {
-            printf("Contour %zd: REJECTED (Hull has %zd points, need 4+)\n", i, hull.size());
             Py_DECREF(cnt_arr);
             continue;
         }
 
         // 6. Success!
-        printf("Contour %zd: ACCEPTED! (Area: %.1f, Hull: %zd pts)\n", i, area, hull.size());
 
         std::vector<Point> quad = find_largest_quad(hull);
         
@@ -368,7 +362,6 @@ static PyObject* customCV_find_quads(PyObject* self, PyObject* args) {
         Py_DECREF(cnt_arr);
     }
     
-    printf("--- End Debug ---\n");
     return result_list;
 }
 

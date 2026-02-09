@@ -124,8 +124,6 @@ def render(img, obj, projection, model, color=False):
 
     return img
 
-import numpy as np
-
 def draw_line(image, start, end, color=(0, 255, 0)):
     """
     Draws a line on a numpy array image from start to end.
@@ -195,71 +193,464 @@ def detect_edges_binary(binary_image):
 def extract_and_draw_final(frame, resizing_factor=3):
     print(f"--- Processing Frame (Scale: 1/{resizing_factor}) ---")
     
-    # A. PREPROCESSING
-    # Downscale for speed (Processing 1080p is unnecessary for detection)
-    small_frame = fast_scale(frame, scale_factor=resizing_factor)
+    # --- A. PREPROCESSING ---
+    # 1. Downscale for speed
     
-    grey = to_grayscale(small_frame)
     
+    # 2. Grayscale
+    grey = to_grayscale(frame)
+    
+    # 3. Blur (Gaussian)
     blurred = np.empty_like(grey)
-
-    # Gaussian Blur (or use fast_box_blur if you implemented it)
     customCV.gaussian_blur(grey, blurred, 5, 2.0)
-
-    # return blurred 
-
+    
+    # 4. Binarization (Otsu's Method recommended for AR tags)
+    # Using your existing binarization function
     binary = binarization(blurred)
     
-    gradient =  detect_edges_binary(binary)
-
     # return binary
-    # C. EXTRACT CONTOURS (Optimized Flat Version)
-    # The function you defined now uses 'visited_map' and candidate selection.
-    # It returns a simple list of arrays, so we don't need a hierarchy stack.
+
+    small_binary = binary[::resizing_factor, ::resizing_factor]
+    
+    # 5. Edge Detection
+    gradient = detect_edges_binary(small_binary)
+
+    # --- B. EXTRACT CONTOURS ---
     print("DEBUG: Extracting contours...")
     candidate_contours = extract_contours_from_gradient(gradient)
     print(f"DEBUG: Found {len(candidate_contours)} total contours.")
-
-    # return binary
-
-    # return gradient
-    # return binary    
-    # D. GEOMETRIC FILTERING
-    # Adjust thresholds based on resizing. 
-    # If we want to detect the small data bits inside the tags, min_area must be small.
-    min_area_thresh = 50 if resizing_factor == 1 else 10
     
-    # (Assuming you have a filter_contours function, or use list comprehension)
-    # valid_tags = [c for c in candidate_contours if cv2.contourArea(c) > min_area_thresh]
+    # --- C. GEOMETRIC FILTERING ---
+    # Filter small noise based on resizing factor
+    min_area_thresh = 100 if resizing_factor == 1 else 100/resizing_factor
     
-    # For now, using your placeholder:
-    valid_tags = customCV.find_quads(candidate_contours, min_area_thresh)
+    # Filter for Quadrilaterals (using your custom function)
+    quads = customCV.find_quads(candidate_contours, min_area_thresh)
+    
+    # ISOLATE TAGS (The Hierarchy Logic)
+    # This keeps valid tags and removes paper borders/data noise
+    valid_tags = isolate_multiple_tags(quads)
+    # valid_tags = quads
+    print(f"DEBUG: Filtered down to {len(valid_tags)} valid tags.")
 
-    # return binary
-
-    # valid_tags = candidate_contours
-    print(f"DEBUG: Filtered down to {len(valid_tags)} valid shapes.")
-
-    # E. DRAWING (RED FILL)
+    # --- D. DECODING & DRAWING ---
     output_frame = frame.copy()
-    red_color = (0, 0, 255) # BGR
     
     for tag in valid_tags:
-        # 'tag' is a numpy array of coordinates
+        # 'tag' is a numpy array of [row, col] (y, x) in DOWNSCALED coordinates.
         
-        # 1. Upscale coordinates to match original 1080p frame
-        upscaled_tag = tag * resizing_factor
+        # 1. DECODE ID
+        # We use the small binary image and small coordinates for decoding.
+        # We must flip [y, x] -> [x, y] for the Homography logic.
+        tag_full_xy = (tag * resizing_factor).astype(np.float32)
+        # Flip [row, col] -> [x, y] for homography
+        tag_full_xy = tag_full_xy[:, ::-1] 
+        print(tag_full_xy)
         
-        # 2. Convert to standard OpenCV format: (N, 1, 2)
-        # FLIP [row, col] -> [x, y] for OpenCV drawing functions
-        pts = upscaled_tag[:, ::-1].astype(np.int32)
-        pts = pts.reshape((-1, 1, 2))
+        # dst_pts = np.array([[144, 246], [171, 303], [240, 264], [210, 210]])
+
+        # Pass the small binary image to read the bits
+        tag_id, angle = decode_tag_id(grey, tag_full_xy)
+    
+        # 2. PREPARE DRAWING COORDINATES
+        # Upscale: Multiply by resizing factor to map back to 1080p
+        # Flip: Ensure we have [x, y] for OpenCV drawing functions
+        upscaled_tag = (tag * resizing_factor).astype(np.int32)
         
-        # 3. Draw the shape
-        cv2.polylines(output_frame, [pts], isClosed=True, color=red_color, thickness=5)
+        # Reshape to standard OpenCV format: (N, 1, 2)
+        # We slice [:, ::-1] to flip Y,X to X,Y
+        draw_pts = upscaled_tag[:, ::-1].reshape((-1, 1, 2))
+        
+        # 3. DRAW THE GREEN BOX
+        cv2.polylines(output_frame, [draw_pts], isClosed=True, color=(0, 255, 0), thickness=5)
+
+        dest_corners = draw_pts.reshape(4, 2).astype(np.float32)
+        template_img = cv2.imread('assets/iitd_logo_template.jpg')
+        # OVERLAY IMAGE
+        # Only overlay if you successfully decoded the orientation
+        if tag_id is not None:
+             output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
+        
+        # 4. DRAW THE ID TEXT
+        # Calculate center of the tag for text placement
+        # M = cv2.moments(draw_pts)
+        # if M["m00"] != 0:
+        #     cX = int(M["m10"] / M["m00"])
+        #     cY = int(M["m01"] / M["m00"])
+        
+        #     text = f"ID: {tag_id}"
             
+        #     # Draw black outline for text readability
+        #     cv2.putText(output_frame, text, (cX - 40, cY), 
+        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+        #     # Draw red text
+        #     cv2.putText(output_frame, text, (cX - 40, cY), 
+        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            
+            # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
+            # You might need to rotate this point based on 'angle' to show true "Up"
+            # corner_pt = tuple(draw_pts[1][0]) # Assuming index 1 is TR
+            # cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
+
     return output_frame
 
+def superimpose_image(frame, tag_corners, template_image, orientation_angle):
+    """
+    Overlays a template image onto the detected AR tag, respecting orientation.
+    """
+    if template_image is None:
+        return frame
+        
+    # 1. Prepare Source Points (The Template Image Corners)
+    # Order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+    h_temp, w_temp = template_image.shape[:2]
+    src_pts = np.array([
+        [0, 0], 
+        [w_temp - 1, 0], 
+        [w_temp - 1, h_temp - 1], 
+        [0, h_temp - 1]
+    ], dtype=np.float32)
+
+    # 2. Prepare Destination Points (The Tag on Screen)
+    # We must order the detected corners to match the template order (TL, TR, BR, BL).
+    # First, get them in the standard geometric order.
+    dst_pts = order_points(tag_corners)
+    
+    # 3. Adjust for Orientation
+    # The 'orientation_angle' tells us how much the tag is rotated.
+    # We shift the destination corners list so that index 0 is always the "True Top-Left".
+    
+    # Logic:
+    # 0 deg   -> Anchor is TR. No shift needed.
+    # 90 deg  -> Anchor is TL. Shift 1.
+    # 180 deg -> Anchor is BL. Shift 2.
+    # 270 deg -> Anchor is BR. Shift 3.
+    
+    shift_amount = 0
+    if orientation_angle == 90:
+        shift_amount = 1
+    elif orientation_angle == 180:
+        shift_amount = 2
+    elif orientation_angle == 270:
+        shift_amount = 3
+        
+    # Use numpy.roll to shift the array elements
+    # We shift 'dst_pts' so the correct physical corner aligns with 'src_pts' [0,0]
+    dst_pts = np.roll(dst_pts, shift_amount, axis=0)
+
+    # 4. Calculate Homography
+    H, _ = cv2.findHomography(src_pts, dst_pts)
+
+    # 5. Warp the Template Image
+    # This creates an image of the same size as 'frame', but with the template
+    # warped into the correct position. Black everywhere else.
+    h_frame, w_frame = frame.shape[:2]
+    warped_img = cv2.warpPerspective(template_image, H, (w_frame, h_frame))
+
+    # 6. Create a Mask to composite
+    # We need to cut a hole in the frame where the tag is, and fill it with the warped image.
+    
+    # Create a mask of the warped image (White where the image is, Black elsewhere)
+    # Grayscale -> Threshold
+    mask = np.zeros((h_frame, w_frame), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, dst_pts.astype(np.int32), 255)
+    
+    # Invert mask (Black hole where tag is, White elsewhere)
+    mask_inv = cv2.bitwise_not(mask)
+    
+    # 7. Blend
+    # Black out the area of the tag in the original frame
+    frame_bg = cv2.bitwise_and(frame, frame, mask=mask_inv)
+    
+    # Take only the warped image region
+    img_fg = cv2.bitwise_and(warped_img, warped_img, mask=mask)
+    
+    # Add them together
+    final_frame = cv2.add(frame_bg, img_fg)
+    
+    return final_frame
+
+def decode_tag_id(binary_image, corners):
+    """
+    Robust decoding with Center Sampling and Adaptive Thresholding.
+    """
+    # 1. Perspective Transform
+    # Use a fixed size (e.g., 200px)
+    size = 200
+    cell_size = size // 8
+    
+    dst_pts = np.array([
+        [0, 0], [size-1, 0], [size-1, size-1], [0, size-1]
+    ], dtype=np.float32)
+    
+    rect = order_points(corners)
+    M = cv2.getPerspectiveTransform(rect, dst_pts)
+    
+    # Warp the image
+    warped = cv2.warpPerspective(binary_image, M, (size, size))
+    
+    # 2. CRITICAL FIX: Re-Threshold the Warped Tag
+    # Sometimes lighting varies across the tag. We enforce strict Black/White
+    # on the warped image itself. Otsu is safest here.
+    # Note: binary_image should be uint8.
+    _, warped_bin = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # DEBUG: Un-comment this to see exactly what the decoder sees!
+    # If this looks like a white blob, your corners are detecting the Paper, not the Tag.
+    # cv2.imshow("Debug Warped Tag", warped_bin) 
+
+    # 3. Read the Grid using CENTER SAMPLING
+    grid = np.zeros((8, 8), dtype=int)
+    
+    # Define a safe margin (e.g., 30%) to ignore the edges of each cell
+    margin = int(cell_size * 0.3)
+    
+    for y in range(8):
+        for x in range(8):
+            # Coordinates of the cell
+            x_start = x * cell_size
+            y_start = y * cell_size
+            x_end = (x + 1) * cell_size
+            y_end = (y + 1) * cell_size
+            
+            # Extract only the CENTER region of the cell (ignoring borders)
+            # This makes it robust against bad homography/rotation
+            cell_center = warped_bin[y_start+margin : y_end-margin, 
+                                     x_start+margin : x_end-margin]
+            
+            # If the center is mostly White, it's a 1.
+            if cv2.mean(cell_center)[0] > 127:
+                grid[y, x] = 1
+            else:
+                grid[y, x] = 0
+
+    # 4. Determine Orientation (Rotate until White Anchor is at Top-Right)
+    # The Inner 4x4 grid is indices 2 to 5.
+    # Top-Right of inner grid is at index [2, 5].
+    
+    orientation = 0
+    found = False
+    
+    for angle in [0, 90, 180, 270]:
+        # Check if the Anchor (2,5) is White (1)
+        # AND check if the other corners are Black (0) to reduce false positives
+        # Corners: TL(2,2), TR(2,5), BR(5,5), BL(5,2)
+        is_anchor_white = (grid[2, 5] == 1)
+        
+        # Optional: strictly check other corners are black (if your tag design follows that)
+        # For now, we trust the single white anchor.
+        if is_anchor_white:
+            orientation = angle
+            found = True
+            break
+        else:
+            grid = np.rot90(grid) # Rotate grid counter-clockwise
+            
+    # If we spun 360 and didn't find the anchor, the ID will likely be garbage (or 15).
+    if not found:
+        return None, 0 # Return None to indicate read failure
+    
+    # 5. Decode ID from Central 2x2
+    # Grid: (3,3), (3,4), (4,3), (4,4)
+    bit1 = grid[3, 3]
+    bit2 = grid[3, 4]
+    bit3 = grid[4, 3]
+    bit4 = grid[4, 4]
+    
+    tag_id = (bit1 << 3) | (bit2 << 2) | (bit3 << 1) | bit4
+    
+    return tag_id, orientation
+
+def get_perspective_transform(src, dst):
+    """
+    Calculates the 3x3 Perspective Transform Matrix (Homography) 
+    from 4 pairs of corresponding points.
+    
+    Args:
+        src: (4, 2) numpy array of source points [x, y]
+        dst: (4, 2) numpy array of destination points [x, y]
+        
+    Returns:
+        M: (3, 3) numpy array representing the transform matrix.
+    """
+    # Ensure inputs are float32 for precision
+    src = np.array(src, dtype=np.float32)
+    dst = np.array(dst, dtype=np.float32)
+    
+    # We need to solve for 8 unknowns in the matrix:
+    # [ h00, h01, h02 ]
+    # [ h10, h11, h12 ]
+    # [ h20, h21,   1 ]  <-- We fix h22 = 1
+    
+    # The system is A * h = B
+    # A will be (8, 8), h will be (8,), B is (8,)
+    A = []
+    B = []
+    
+    for i in range(4):
+        x, y = src[i]
+        u, v = dst[i]
+        
+        # Equation 1 (for x-coordinate 'u'):
+        # h00*x + h01*y + h02 - h20*x*u - h21*y*u = u
+        A.append([x, y, 1, 0, 0, 0, -x*u, -y*u])
+        B.append(u)
+        
+        # Equation 2 (for y-coordinate 'v'):
+        # h10*x + h11*y + h12 - h20*x*v - h21*y*v = v
+        A.append([0, 0, 0, x, y, 1, -x*v, -y*v])
+        B.append(v)
+        
+    # Convert to numpy arrays
+    A = np.array(A)
+    B = np.array(B)
+    
+    # Solve the linear system: A * h = B
+    # We use np.linalg.solve (Gaussian elimination / LU decomposition)
+    try:
+        h = np.linalg.solve(A, B)
+    except np.linalg.LinAlgError:
+        print("Error: Matrix is singular. Points might be collinear.")
+        return None
+
+    # Construct the final 3x3 matrix
+    # Append the fixed h22 = 1 at the end
+    M = np.append(h, 1).reshape((3, 3))
+    
+    return M
+
+def order_points(pts):
+    """
+    Orders coordinates: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+    """
+    rect = np.zeros((4, 2), dtype="float32")
+    pts = pts.reshape(4, 2)
+    
+    # Sum: TL has min sum, BR has max sum
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    
+    # Diff: TR has min diff (x-y), BL has max diff (x-y)
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    
+    return rect
+
+def isolate_multiple_tags(quads, min_ratio=0.04, max_ratio=0.12):
+    """
+    Detects MULTIPLE AR tags by finding all 'Significant Children'.
+    
+    Args:
+        quads: List of simplified contours (4 corners).
+        min_ratio: Minimum size of Child relative to Parent (filters out Data bits).
+        max_ratio: Maximum size (filters out duplicate borders/noise).
+        
+    Returns:
+        valid_tags: List of contours, where each contour is an AR Tag.
+    """
+    if not quads:
+        return []
+    
+    # print(len(quads))
+    
+    candidates = []
+    
+    # 1. Identify Parent-Child Relationships
+    # We look for pairs where Inner is inside Outer
+    for i, inner in enumerate(quads):
+
+        outer_list = []
+        for j, outer in enumerate(quads):
+            if i == j: continue
+            
+            # Check Nesting
+            if is_quad_inside(inner, outer):
+
+                flag = False
+                for k, inner_inner in enumerate(quads):
+                    if(k == j or k == i): continue
+
+                    if is_quad_inside(inner_inner, inner):
+                        flag = True
+                        break
+                
+                if(not flag):
+                    outer_list.append(outer)
+        
+        # Append only the outer with max area
+        if outer_list:
+            max_outer = min(outer_list, key=cv2.contourArea)
+            candidates.append(max_outer)
+
+    
+    # 2. Clean Up Duplicates (Optional but recommended)
+    # Sometimes a tag might be detected twice (very close concentric lines).
+    # We perform a simple Non-Max Suppression.
+    # return candidates
+    return remove_overlapping_quads(candidates)
+
+def remove_overlapping_quads(candidates, iou_threshold=0.8):
+    """
+    Removes duplicate detections of the same tag.
+    Keeps the largest one (Outer Border).
+    """
+    if not candidates: return []
+    
+    # Sort by Area (Descending) -> We prefer the larger "Outer" border
+    candidates = sorted(candidates, key=cv2.contourArea, reverse=True)
+    
+    keep = []
+    for current in candidates:
+        is_duplicate = False
+        for kept in keep:
+            if is_quad_inside(current, kept) or is_quad_inside(kept, current):
+                 # Check how similar they are
+                 a1 = cv2.contourArea(current)
+                 a2 = cv2.contourArea(kept)
+                 # If sizes are within 20% of each other, it's the same object
+                 if min(a1, a2) / max(a1, a2) > iou_threshold:
+                     is_duplicate = True
+                     break
+        
+        if not is_duplicate:
+            keep.append(current)
+            
+    return keep
+
+def point_in_polygon(point, polygon):
+    """
+    Custom implementation of point-in-polygon test using ray casting algorithm.
+    Returns True if point is inside polygon, False otherwise.
+    """
+    x, y = point
+    n = len(polygon)
+    inside = False
+    
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    
+    return inside
+
+def is_quad_inside(inner, outer):
+    """ Strictly inside check using custom point-in-polygon test """
+    # Convert outer to list of tuples for the custom function
+    outer_polygon = [(float(pt[0]), float(pt[1])) for pt in outer]
+    
+    for pt in inner:
+        if not point_in_polygon((float(pt[0]), float(pt[1])), outer_polygon):
+            return False
+    return True
 
 def binarization(gray_image):
     """
@@ -315,7 +706,7 @@ def binarization(gray_image):
     binary_image = np.zeros((h, w), dtype=np.uint8)
     binary_image[gray_image > optimal_threshold] = 255
 
-    close_gaps(binary_image, iterations=2)
+    close_gaps(binary_image, iterations=1)
 
     return binary_image
 
@@ -347,24 +738,6 @@ def to_grayscale(image):
     gray_image = gray_float.astype(np.uint8)
     
     return gray_image
-
-def fast_scale(image, scale_factor):
-    """
-    Downscales an image by skipping pixels (Nearest Neighbor).
-    Extremely fast because it uses memory slicing instead of math.
-    
-    Args:
-        image: Input image (2D or 3D numpy array).
-        scale_factor: Integer (e.g., 2 for half size, 4 for quarter size).
-        
-    Returns:
-        scaled_image: The downsized image.
-    """
-    # Slicing syntax: [start:stop:step]
-    # We take every n-th pixel in both rows and columns.
-    scaled_image = image[::scale_factor, ::scale_factor]
-    
-    return scaled_image
 
 
 def minimum_filter(image):
@@ -452,28 +825,6 @@ def morphological_opening(binary_image, iterations=1):
         img = minimum_filter(img)
         
     return img
-
-# --- Helpers needed if you don't have them ---
-def maximum_filter(image):
-    # Expands White (255) -> Erodes Black
-    padded = np.pad(image, 1, mode='constant', constant_values=0)
-    # Checks 5-point cross pattern
-    p0 = padded[1:-1, 1:-1]
-    p1 = padded[0:-2, 1:-1] # Top
-    p2 = padded[2:,   1:-1] # Bottom
-    p3 = padded[1:-1, 0:-2] # Left
-    p4 = padded[1:-1, 2:]   # Right
-    return np.maximum.reduce([p0, p1, p2, p3, p4])
-
-def minimum_filter(image):
-    # Expands Black (0) -> Dilates Black
-    padded = np.pad(image, 1, mode='constant', constant_values=255)
-    p0 = padded[1:-1, 1:-1]
-    p1 = padded[0:-2, 1:-1]
-    p2 = padded[2:,   1:-1]
-    p3 = padded[1:-1, 0:-2]
-    p4 = padded[1:-1, 2:] 
-    return np.minimum.reduce([p0, p1, p2, p3, p4])
 
 def extract_contours_from_gradient(edge_image):
     contours = []

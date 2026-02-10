@@ -190,7 +190,7 @@ def detect_edges_binary(binary_image):
     
     return edge_image
 
-def extract_and_draw_final(frame, resizing_factor=3):
+def extract_and_draw_final(frame, resizing_factor=1):
     
     # --- A. PREPROCESSING ---
     # 1. Downscale for speed
@@ -213,85 +213,80 @@ def extract_and_draw_final(frame, resizing_factor=3):
     
     # --- B. EXTRACT CONTOURS ---
     contours, hierarchy = customCV.find_contours(gradient)
-    # contours, hierarchy = cv2.findContours(gradient, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    tags = extract_tags(contours,hierarchy)
 
 
-    # corrected_contours = []
+    corrected_contours = []
 
-    # for cnt in candidate_contours:
-    #     # 1. Swap columns from [y, x] to [x, y]
-    #     # [:, ::-1] is a fast way to reverse the last dimension
-    #     cnt_xy = cnt[:, ::-1]*resizing_factor
+    for cnt in tags:
+        # 1. Swap columns from [y, x] to [x, y]
+        # [:, ::-1] is a fast way to reverse the last dimension
+        # cnt_xy = cnt[:, ::-1]*resizing_factor
         
-    #     # 2. Reshape to (N, 1, 2) and ensure it's int32
-    #     cnt_formatted = cnt_xy.reshape((-1, 1, 2)).astype(np.int32)
+        # 2. Reshape to (N, 1, 2) and ensure it's int32
+        cnt_formatted = cnt.reshape((-1, 1, 2)).astype(np.int32)
         
-    #     corrected_contours.append(cnt_formatted)
+        corrected_contours.append(cnt_formatted)
 
-    l = []
-    corners = []
+    # l = []
+    # corners = []
 
-    # Loop through the hierarchy array (shape (1, N, 4))
-    for i in range(len(contours)):
+    # # Loop through the hierarchy array (shape (1, N, 4))
+    # for i in range(len(contours)):
 
-        # Filter 1: Look for contours with a parent (Parent index is at hierarchy[0][i][3])
-        # Suzuki-Abe parent index != -1 means it is a child/hole
-        parent_id = hierarchy[0][i][3]
+    #     # Filter 1: Look for contours with a parent (Parent index is at hierarchy[0][i][3])
+    #     # Suzuki-Abe parent index != -1 means it is a child/hole
+    #     parent_id = hierarchy[0][i][3]
         
-        if parent_id != -1:
+    #     if parent_id != -1:
 
-            # Filter 2: Centroid Check
-            # Ensure the child and parent share a similar center of mass
-            M1 = cv2.moments(contours[i])
-            M2 = cv2.moments(contours[parent_id])
+    #         # Filter 2: Centroid Check
+    #         # Ensure the child and parent share a similar center of mass
+    #         M1 = cv2.moments(contours[i])
+    #         M2 = cv2.moments(contours[parent_id])
             
-            if M1["m00"] != 0 and M2["m00"] != 0:
-                c1 = np.array([int(M1["m10"] / M1["m00"]), int(M1["m01"] / M1["m00"])])
-                c2 = np.array([int(M2["m10"] / M2["m00"]), int(M2["m01"] / M2["m00"])])
+    #         if M1["m00"] != 0 and M2["m00"] != 0:
+    #             c1 = np.array([int(M1["m10"] / M1["m00"]), int(M1["m01"] / M1["m00"])])
+    #             c2 = np.array([int(M2["m10"] / M2["m00"]), int(M2["m01"] / M2["m00"])])
                 
-                # Distance threshold to verify alignment (perspective robust)
-                if np.linalg.norm(c1 - c2) < 15:
+    #             # Distance threshold to verify alignment (perspective robust)
+    #             if np.linalg.norm(c1 - c2) < 15:
 
-                    # Filter 3: Check inner portion complexity (10 points specified)
-                    # approxPolyDP uses Douglas-Peucker to simplify vertices
-                    p1 = arc_length(contours[i], True)
-                    approx1 = cv2.approxPolyDP(contours[i], 0.02 * p1, True)
+    #                 # Filter 3: Check inner portion complexity (10 points specified)
+    #                 # approxPolyDP uses Douglas-Peucker to simplify vertices
+    #                 p1 = arc_length(contours[i], True)
+    #                 approx1 = cv2.approxPolyDP(contours[i], 0.02 * p1, True)
                     
-                    if len(approx1)>4:
+    #                 if len(approx1)>4:
 
-                        # Filter 4: Look for quadrilateral parents (the marker border)
-                        p2 = arc_length(contours[parent_id], True)
-                        approx2 = cv2.approxPolyDP(contours[parent_id], 0.02 * p2, True)
+    #                     # Filter 4: Look for quadrilateral parents (the marker border)
+    #                     p2 = arc_length(contours[parent_id], True)
+    #                     approx2 = cv2.approxPolyDP(contours[parent_id], 0.02 * p2, True)
                         
-                        if len(approx2) == 4:
-                            l.append(i)
-                            l.append(parent_id)
-                            corners.append(approx1)
-                            corners.append(approx2)
+    #                     if len(approx2) == 4:
+    #                         l.append(i)
+    #                         l.append(parent_id)
+    #                         corners.append(approx1)
+    #                         corners.append(approx2)
 
 
-    filteredContours = [contours[idx] for idx in l]
-    rescaled_contours = [(cnt * resizing_factor).astype(np.int32) for cnt in filteredContours]
-    cv2.drawContours(frame,rescaled_contours,-1,(0,0,255),3)
+    # filteredContours = [contours[idx] for idx in l]
+    # rescaled_contours = [(cnt * resizing_factor).astype(np.int32) for cnt in filteredContours]
+    cv2.drawContours(frame,corrected_contours,-1,(0,255,0),3)
 
     # rescaled_contours = [(cnt * resizing_factor).astype(np.int32) for cnt in contours]
     # cv2.drawContours(frame, rescaled_contours, -1, (0, 255, 0), 3)
-    return frame
+    # return frame
 
     # --- C. GEOMETRIC FILTERING ---
     # Filter small noise based on resizing factor
     min_area_thresh = 100 if resizing_factor == 1 else 100/resizing_factor
     
-    # Filter for Quadrilaterals (using your custom function)
-    # quads = customCV.find_quads(candidate_contours, min_area_thresh)
-    
-    # ISOLATE TAGS (The Hierarchy Logic)
-    # This keeps valid tags and removes paper borders/data noise
-    # valid_tags = isolate_multiple_tags(quads)
 
     # --- D. DECODING & DRAWING ---
     output_frame = frame.copy()
-    for tag in valid_tags:
+    for tag in corrected_contours:
         # 'tag' is a numpy array of [row, col] (y, x) in DOWNSCALED coordinates.
         
         # 1. DECODE ID
@@ -305,27 +300,27 @@ def extract_and_draw_final(frame, resizing_factor=3):
 
         # Pass the small binary image to read the bits
         # return decode_tag_id(frame, tag_full_xy)
-        # tag_id, angle = decode_tag_id(frame, tag_full_xy)
+        tag_id, angle = decode_tag_id(frame, tag)
     
         # 2. PREPARE DRAWING COORDINATES
         # Upscale: Multiply by resizing factor to map back to 1080p
         # Flip: Ensure we have [x, y] for OpenCV drawing functions
-        upscaled_tag = (tag * resizing_factor).astype(np.int32)
+        # upscaled_tag = (tag * resizing_factor).astype(np.int32)
         
         # Reshape to standard OpenCV format: (N, 1, 2)
         # We slice [:, ::-1] to flip Y,X to X,Y
         # draw_pts = upscaled_tag[:, ::-1].reshape((-1, 1, 2))
         
         # 3. DRAW THE GREEN BOX
-        cv2.polylines(output_frame, [upscaled_tag], isClosed=True, color=(0, 255, 0), thickness=5)
+        # cv2.polylines(output_frame, [upscaled_tag], isClosed=True, color=(0, 255, 0), thickness=5)
 
-        # dest_corners = draw_pts.reshape(4, 2).astype(np.float32)
-        # template_img = cv2.imread('assets/iitd_logo_template.jpg')
+        dest_corners = tag.reshape(4, 2).astype(np.float32)
+        template_img = cv2.imread('assets/iitd_logo_template.jpg')
         # OVERLAY IMAGE
         # Only overlay if you successfully decoded the orientation
 
-        # if tag_id is not None:
-        #      output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
+        if tag_id is not None:
+             output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
         
         # 4. DRAW THE ID TEXT
         # Calculate center of the tag for text placement
@@ -363,6 +358,55 @@ def extract_and_draw_final(frame, resizing_factor=3):
         #     cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
 
     return output_frame
+
+def extract_tags(contours, hierarchy):
+    """
+    Analyzes contours and hierarchy to find nested tags and return ordered corners.
+    """
+    all_tag_corners = []
+    processed_parents = set()
+
+    # hierarchy shape is usually (1, N, 4) -> [Next, Previous, First_Child, Parent]
+    if hierarchy is None or len(hierarchy) == 0:
+        return []
+
+    for i in range(len(contours)):
+        # Filter 1: Look for contours with a parent (child/hole)
+        parent_id = hierarchy[0][i][3]
+        
+        # Only process if it has a parent and we haven't already validated this tag
+        if parent_id != -1 and parent_id not in processed_parents:
+
+            # Filter 2: Centroid Check
+            M1 = cv2.moments(contours[i])
+            M2 = cv2.moments(contours[parent_id])
+            
+            if M1["m00"] != 0 and M2["m00"] != 0:
+                c1 = np.array([M1["m10"] / M1["m00"], M1["m01"] / M1["m00"]])
+                c2 = np.array([M2["m10"] / M2["m00"], M2["m01"] / M2["m00"]])
+                
+                # Verify centers are close (within 15 pixels)
+                if np.linalg.norm(c1 - c2) < 15:
+
+                    # Filter 3: Check inner portion complexity
+                    p1 = cv2.arcLength(contours[i], True)
+                    approx1 = cv2.approxPolyDP(contours[i], 0.02 * p1, True)
+                    
+                    if len(approx1) > 4:
+
+                        # Filter 4: Look for quadrilateral parents (the tag border)
+                        p2 = cv2.arcLength(contours[parent_id], True)
+                        approx2 = cv2.approxPolyDP(contours[parent_id], 0.02 * p2, True)
+                        
+                        if len(approx2) == 4:
+                            # Order the 4 corners of the parent (the tag)
+                            ordered_corners = order_points(approx2)
+                            all_tag_corners.append(ordered_corners)
+                            
+                            # Mark parent as processed to avoid duplicate detection
+                            processed_parents.add(parent_id)
+
+    return all_tag_corners
 
 def superimpose_image(frame, tag_corners, template_image, orientation_angle):
     """
@@ -512,8 +556,6 @@ def decode_tag_id(frame, corners):
     
     orientation = 0
     found = False
-
-    print(grid)
     
     for angle in [0, 90, 180, 270]:
         # Check if the Anchor (2,5) is White (1)
@@ -712,6 +754,8 @@ def get_perspective_transform(src, dst):
 def order_points(pts):
     """
     Orders coordinates: Top-Left, Bottom-Left, Bottom-Right, Top-Right.
+
+    Expects inputs in xy format and returns in xy aswell.
     """
     rect = np.zeros((4, 2), dtype="float32")
     pts = pts.reshape(4, 2)
@@ -727,120 +771,6 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     
     return rect
-
-def isolate_multiple_tags(quads, min_ratio=0.04, max_ratio=0.12):
-    """
-    Detects MULTIPLE AR tags by finding all 'Significant Children'.
-    
-    Args:
-        quads: List of simplified contours (4 corners).
-        min_ratio: Minimum size of Child relative to Parent (filters out Data bits).
-        max_ratio: Maximum size (filters out duplicate borders/noise).
-        
-    Returns:
-        valid_tags: List of contours, where each contour is an AR Tag.
-    """
-    if not quads:
-        return []
-    
-    # print(len(quads))
-    
-    candidates = []
-    
-    # 1. Identify Parent-Child Relationships
-    # We look for pairs where Inner is inside Outer
-    for i, inner in enumerate(quads):
-
-        outer_list = []
-        for j, outer in enumerate(quads):
-            if i == j: continue
-            
-            # Check Nesting
-            if is_quad_inside(inner, outer):
-
-                flag = False
-                for k, inner_inner in enumerate(quads):
-                    if(k == j or k == i): continue
-
-                    if is_quad_inside(inner_inner, inner):
-                        flag = True
-                        break
-                
-                if(not flag):
-                    outer_list.append(outer)
-        
-        # Append only the outer with max area
-        if outer_list:
-            max_outer = min(outer_list, key=cv2.contourArea)
-            candidates.append(max_outer)
-
-    
-    # 2. Clean Up Duplicates (Optional but recommended)
-    # Sometimes a tag might be detected twice (very close concentric lines).
-    # We perform a simple Non-Max Suppression.
-    # return candidates
-    return remove_overlapping_quads(candidates)
-
-def remove_overlapping_quads(candidates, iou_threshold=0.8):
-    """
-    Removes duplicate detections of the same tag.
-    Keeps the largest one (Outer Border).
-    """
-    if not candidates: return []
-    
-    # Sort by Area (Descending) -> We prefer the larger "Outer" border
-    candidates = sorted(candidates, key=cv2.contourArea, reverse=True)
-    
-    keep = []
-    for current in candidates:
-        is_duplicate = False
-        for kept in keep:
-            if is_quad_inside(current, kept) or is_quad_inside(kept, current):
-                 # Check how similar they are
-                 a1 = cv2.contourArea(current)
-                 a2 = cv2.contourArea(kept)
-                 # If sizes are within 20% of each other, it's the same object
-                 if min(a1, a2) / max(a1, a2) > iou_threshold:
-                     is_duplicate = True
-                     break
-        
-        if not is_duplicate:
-            keep.append(current)
-            
-    return keep
-
-def point_in_polygon(point, polygon):
-    """
-    Custom implementation of point-in-polygon test using ray casting algorithm.
-    Returns True if point is inside polygon, False otherwise.
-    """
-    x, y = point
-    n = len(polygon)
-    inside = False
-    
-    p1x, p1y = polygon[0]
-    for i in range(1, n + 1):
-        p2x, p2y = polygon[i % n]
-        if y > min(p1y, p2y):
-            if y <= max(p1y, p2y):
-                if x <= max(p1x, p2x):
-                    if p1y != p2y:
-                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                    if p1x == p2x or x <= xinters:
-                        inside = not inside
-        p1x, p1y = p2x, p2y
-    
-    return inside
-
-def is_quad_inside(inner, outer):
-    """ Strictly inside check using custom point-in-polygon test """
-    # Convert outer to list of tuples for the custom function
-    outer_polygon = [(float(pt[0]), float(pt[1])) for pt in outer]
-    
-    for pt in inner:
-        if not point_in_polygon((float(pt[0]), float(pt[1])), outer_polygon):
-            return False
-    return True
 
 def binarization(gray_image):
     """

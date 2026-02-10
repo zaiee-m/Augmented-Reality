@@ -22,7 +22,6 @@ def main():
         ret, frame = cap.read()
         if not ret:
             break
-        
         cv2.imshow("Frame", extract_and_draw_final(frame))
         
         if cv2.waitKey(1) & 0xFF == ord('q'):

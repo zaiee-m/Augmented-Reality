@@ -212,6 +212,7 @@ def extract_and_draw_final(frame, resizing_factor=3):
     # 5. Edge Detection
     gradient = detect_edges_binary(binary)
 
+
     # --- B. EXTRACT CONTOURS ---
     candidate_contours = extract_contours_from_gradient(gradient)
     
@@ -240,9 +241,10 @@ def extract_and_draw_final(frame, resizing_factor=3):
         # Flip [row, col] -> [x, y] for homography
         tag_full_xy = tag_full_xy[:, ::-1] 
         
-        # dst_pts = np.array([[144, 246], [171, 303], [240, 264], [210, 210]])
+        tag_full_xy = order_points(tag_full_xy)
 
         # Pass the small binary image to read the bits
+        # return decode_tag_id(frame, tag_full_xy)
         tag_id, angle = decode_tag_id(frame, tag_full_xy)
     
         # 2. PREPARE DRAWING COORDINATES
@@ -261,29 +263,44 @@ def extract_and_draw_final(frame, resizing_factor=3):
         template_img = cv2.imread('assets/iitd_logo_template.jpg')
         # OVERLAY IMAGE
         # Only overlay if you successfully decoded the orientation
-        if tag_id is not None:
-             output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
+
+        # if tag_id is not None:
+        #      output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
         
         # 4. DRAW THE ID TEXT
         # Calculate center of the tag for text placement
-        # M = cv2.moments(draw_pts)
-        # if M["m00"] != 0:
-        #     cX = int(M["m10"] / M["m00"])
-        #     cY = int(M["m01"] / M["m00"])
+        M = cv2.moments(draw_pts)
+        if M["m00"] != 0:
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
         
-        #     text = f"ID: {tag_id}"
+            text = f"ID: {tag_id}"
             
-        #     # Draw black outline for text readability
-        #     cv2.putText(output_frame, text, (cX - 40, cY), 
-        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
-        #     # Draw red text
-        #     cv2.putText(output_frame, text, (cX - 40, cY), 
-        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            # Draw black outline for text readability
+            cv2.putText(output_frame, text, (cX - 40, cY), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+            # Draw red text
+            cv2.putText(output_frame, text, (cX - 40, cY), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
             
             # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
             # You might need to rotate this point based on 'angle' to show true "Up"
-            # corner_pt = tuple(draw_pts[1][0]) # Assuming index 1 is TR
-            # cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
+
+            # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
+            if angle == 0:
+                tr_index = 3
+            elif angle == 90:
+                tr_index = 2
+            elif angle == 180:
+                tr_index = 1  # Physical TR is now at Screen Bottom-Left
+            else: # angle == 270
+                tr_index = 0 # Physical TR is now at Screen Bottom-Right
+
+            # Extract point and ensure it's a tuple of integers
+            # draw_pts is shape (4, 1, 2), so we access [index][0]
+            tr_point = draw_pts[tr_index][0]
+            corner_pt = tuple(tr_point) # Assuming index 1 is TR
+            cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
 
     return output_frame
 
@@ -295,17 +312,17 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
         return frame
         
     # 1. Prepare Source Points (The Template Image Corners)
-    # Order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+    # Order: Top-Left, Bottom-Left, Bottom-Right, Top-Right.
     h_temp, w_temp = template_image.shape[:2]
     src_pts = np.array([
-        [0, 0], 
-        [w_temp - 1, 0], 
-        [w_temp - 1, h_temp - 1], 
-        [0, h_temp - 1]
+        [0, 0],                     # Index 0: Top-Left
+        [w_temp - 1, 0],            # Index 1: Top-Right
+        [w_temp - 1, h_temp - 1],   # Index 2: Bottom-Right
+        [0, h_temp - 1]             # Index 3: Bottom-Left
     ], dtype=np.float32)
 
     # 2. Prepare Destination Points (The Tag on Screen)
-    # We must order the detected corners to match the template order (TL, TR, BR, BL).
+    # We must order the detected corners to match the template order (TL, BL, BR, TR).
     # First, get them in the standard geometric order.
     dst_pts = order_points(tag_corners)
     
@@ -318,14 +335,20 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
     # 90 deg  -> Anchor is TL. Shift 1.
     # 180 deg -> Anchor is BL. Shift 2.
     # 270 deg -> Anchor is BR. Shift 3.
+
+    # Logic:
+    # 0 deg   -> Anchor is TR. No shift needed.
+    # 90 deg  -> Anchor is BR. Shift 1.
+    # 180 deg -> Anchor is BL. Shift 2.
+    # 270 deg -> Anchor is TL. Shift 3.
     
     shift_amount = 0
     if orientation_angle == 90:
-        shift_amount = 1
+        shift_amount = -1  # or 3
     elif orientation_angle == 180:
-        shift_amount = 2
+        shift_amount = -2  # or 2
     elif orientation_angle == 270:
-        shift_amount = 3
+        shift_amount = -3  # or 1
         
     # Use numpy.roll to shift the array elements
     # We shift 'dst_pts' so the correct physical corner aligns with 'src_pts' [0,0]
@@ -381,9 +404,11 @@ def decode_tag_id(frame, corners):
     
     # Warp the image
     warped = warp_perspective_manual(frame, M, (size, size))
-    
+
     if len(warped.shape) == 3 and warped.shape[2] == 3:
         warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+
+    # return warped
 
     # 2. CRITICAL FIX: Re-Threshold the Warped Tag
     # Sometimes lighting varies across the tag. We enforce strict Black/White
@@ -391,6 +416,7 @@ def decode_tag_id(frame, corners):
     # Note: binary_image should be uint8.
     _, warped_bin = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
+
     # DEBUG: Un-comment this to see exactly what the decoder sees!
     # If this looks like a white blob, your corners are detecting the Paper, not the Tag.
     # cv2.imshow("Debug Warped Tag", warped_bin) 
@@ -426,6 +452,8 @@ def decode_tag_id(frame, corners):
     
     orientation = 0
     found = False
+
+    print(grid)
     
     for angle in [0, 90, 180, 270]:
         # Check if the Anchor (2,5) is White (1)
@@ -437,7 +465,8 @@ def decode_tag_id(frame, corners):
         # For now, we trust the single white anchor.
         if is_anchor_white:
             orientation = angle
-            found = True
+            print(angle)
+            found = True 
             break
         else:
             grid = np.rot90(grid) # Rotate grid counter-clockwise
@@ -454,7 +483,21 @@ def decode_tag_id(frame, corners):
     bit4 = grid[4, 4]
     
     tag_id = (bit1 << 3) | (bit2 << 2) | (bit3 << 1) | bit4
+
+    # M = cv2.moments(dst_pts)
+    # if M["m00"] != 0:
+    #     cX = int(M["m10"] / M["m00"])
+    #     cY = int(M["m01"] / M["m00"])
     
+    #     text = f"A: {angle}"
+        
+    #     # Draw black outline for text readability
+    #     cv2.putText(warped_bin, text, (cX - 40, cY), 
+    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+    #     # Draw red text
+    #     cv2.putText(warped_bin, text, (cX - 40, cY), 
+    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+    # return warped_bin
     return tag_id, orientation
 
 def warp_perspective_manual(img, M, dsize):
@@ -608,7 +651,7 @@ def get_perspective_transform(src, dst):
 
 def order_points(pts):
     """
-    Orders coordinates: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+    Orders coordinates: Top-Left, Bottom-Left, Bottom-Right, Top-Right.
     """
     rect = np.zeros((4, 2), dtype="float32")
     pts = pts.reshape(4, 2)
@@ -618,7 +661,7 @@ def order_points(pts):
     rect[0] = pts[np.argmin(s)]
     rect[2] = pts[np.argmax(s)]
     
-    # Diff: TR has min diff (x-y), BL has max diff (x-y)
+    # Diff: BL has min diff (x-y), TR has max diff (x-y)
     diff = np.diff(pts, axis=1)
     rect[1] = pts[np.argmin(diff)]
     rect[3] = pts[np.argmax(diff)]

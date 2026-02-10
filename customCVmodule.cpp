@@ -365,10 +365,165 @@ static PyObject* customCV_find_quads(PyObject* self, PyObject* args) {
     return result_list;
 }
 
+// --- Helper: Find Neighbor Clockwise/Counter-Clockwise ---
+// Uses 1-based indexing for 'padded' image logic
+static bool find_neighbor(int* img, int h, int w, int cy, int cx, int& ny, int& nx, 
+                         int sy, int sx, bool clockwise, const int offsets[8][2]) {
+    int dy = sy - cy;
+    int dx = sx - cx;
+    int start_idx = -1;
+
+    for (int i = 0; i < 8; ++i) {
+        if (offsets[i][0] == dy && offsets[i][1] == dx) {
+            start_idx = i;
+            break;
+        }
+    }
+    if (start_idx == -1) return false;
+
+    for (int i = 1; i <= 8; ++i) {
+        int idx = (start_idx + (clockwise ? i : -i) + 8) % 8;
+        int ty = cy + offsets[idx][0];
+        int tx = cx + offsets[idx][1];
+        if (img[ty * w + tx] != 0) {
+            ny = ty; nx = tx;
+            return true;
+        }
+    }
+    return false;
+}
+
+struct BorderInfo {
+    int parent_idx = -1;
+    int first_child = -1;
+    int next_sibling = -1;
+    int prev_sibling = -1;
+};
+
+static PyObject* customCV_find_contours(PyObject* self, PyObject* args) {
+    PyArrayObject* in_arr;
+    if (!PyArg_ParseTuple(args, "O!", &PyArray_Type, &in_arr)) return NULL;
+
+    int h = (int)PyArray_DIM(in_arr, 0);
+    int w = (int)PyArray_DIM(in_arr, 1);
+    int ph = h + 2, pw = w + 2;
+    std::vector<int> padded(ph * pw, 0);
+    unsigned char* src_data = (unsigned char*)PyArray_DATA(in_arr);
+
+    for (int i = 0; i < h; ++i) {
+        for (int j = 0; j < w; ++j) {
+            if (src_data[i * w + j] > 0) padded[(i + 1) * pw + (j + 1)] = 1;
+        }
+    }
+
+    int nbd = 1; // nbd=1 is background
+    const int offsets[8][2] = {{-1,0}, {-1,1}, {0,1}, {1,1}, {1,0}, {1,-1}, {0,-1}, {-1,-1}};
+    
+    PyObject* py_contours = PyList_New(0);
+    std::vector<BorderInfo> hierarchy_tree;
+    hierarchy_tree.push_back({}); // Placeholder for background (ID 1)
+
+    for (int i = 1; i < ph - 1; ++i) {
+        int lnbd = 1;
+        for (int j = 1; j < pw - 1; ++j) {
+            int& f_ij = padded[i * pw + j];
+            if (f_ij == 0) continue;
+
+            bool is_outer = (f_ij == 1 && padded[i * pw + (j - 1)] == 0);
+            bool is_hole  = (f_ij >= 1 && padded[i * pw + (j + 1)] == 0);
+
+            if (is_outer || is_hole) {
+                nbd++;
+                int current_parent = -1;
+
+                // --- Hierarchy Logic ---
+                if (is_outer) {
+                    // Outer border: parent is LNBD if LNBD is a hole, else parent of LNBD
+                    // In a simplified tree, LNBD is the container
+                    current_parent = lnbd;
+                } else {
+                    // Hole border: parent is the border we are currently on
+                    current_parent = (f_ij > 1) ? f_ij : lnbd;
+                }
+
+                // Update sibling/child pointers for hierarchy
+                BorderInfo info;
+                info.parent_idx = current_parent;
+                int nbd_idx = nbd - 1; // 0-based index for hierarchy array
+                int parent_idx_0 = current_parent - 1;
+
+                if (hierarchy_tree[parent_idx_0].first_child == -1) {
+                    hierarchy_tree[parent_idx_0].first_child = nbd_idx;
+                } else {
+                    int sibling = hierarchy_tree[parent_idx_0].first_child;
+                    while (hierarchy_tree[sibling].next_sibling != -1) {
+                        sibling = hierarchy_tree[sibling].next_sibling;
+                    }
+                    hierarchy_tree[sibling].next_sibling = nbd_idx;
+                    info.prev_sibling = sibling;
+                }
+                hierarchy_tree.push_back(info);
+
+                // --- Trace Border ---
+                int ny, nx, sy = i, sx = (is_outer ? j - 1 : j + 1);
+                std::vector<int> pts;
+                if (!find_neighbor(padded.data(), ph, pw, i, j, ny, nx, sy, sx, true, offsets)) {
+                    padded[i * pw + j] = -nbd;
+                    pts.push_back(j - 1); pts.push_back(i - 1);
+                } else {
+                    int p2y = ny, p2x = nx, p3y = i, p3x = j, fny = ny, fnx = nx;
+                    while (true) {
+                        int p4y, p4x;
+                        find_neighbor(padded.data(), ph, pw, p3y, p3x, p4y, p4x, p2y, p2x, false, offsets);
+                        if (padded[p3y * pw + (p3x + 1)] == 0) padded[p3y * pw + p3x] = -nbd;
+                        else if (padded[p3y * pw + p3x] == 1) padded[p3y * pw + p3x] = nbd;
+                        pts.push_back(p3x - 1); pts.push_back(p3y - 1);
+                        if (p4y == i && p4x == j && p3y == fny && p3x == fnx) break;
+                        p2y = p3y; p2x = p3x; p3y = p4y; p3x = p4x;
+                    }
+                }
+
+                npy_intp out_dims[3] = {(npy_intp)(pts.size() / 2), 1, 2};
+                PyObject* contour_arr = PyArray_SimpleNew(3, out_dims, NPY_INT32);
+                memcpy(PyArray_DATA((PyArrayObject*)contour_arr), pts.data(), pts.size() * sizeof(int));
+                PyList_Append(py_contours, contour_arr);
+                Py_DECREF(contour_arr);
+            }
+            if (f_ij != 1) lnbd = std::abs(f_ij);
+        }
+    }
+
+    // Convert hierarchy to (1, N, 4) array (skipping background ID 1)
+    int num_found = nbd - 1;
+    npy_intp h_dims[3] = {1, num_found, 4};
+    PyObject* py_hierarchy = PyArray_SimpleNew(3, h_dims, NPY_INT32);
+    int* h_data = (int*)PyArray_DATA((PyArrayObject*)py_hierarchy);
+
+for (int k = 0; k < num_found; ++k) {
+    BorderInfo& b = hierarchy_tree[k + 1];
+    
+    // Only subtract 1 if the index is valid (>= 0). 
+    // If it's -1, keep it -1.
+    h_data[k * 4 + 0] = (b.next_sibling >= 0) ? b.next_sibling - 1 : -1;
+    h_data[k * 4 + 1] = (b.prev_sibling >= 0) ? b.prev_sibling - 1 : -1;
+    h_data[k * 4 + 2] = (b.first_child >= 0)  ? b.first_child - 1  : -1;
+    
+    // For Parent: Since parent_idx stores raw NBD values (2, 3, 4...)
+    // and background is 1, a root contour (parent 1) should result in -1.
+    h_data[k * 4 + 3] = (b.parent_idx > 1) ? b.parent_idx - 2 : -1;
+}
+
+    PyObject* result = PyTuple_New(2);
+    PyTuple_SetItem(result, 0, py_contours);
+    PyTuple_SetItem(result, 1, py_hierarchy);
+    return result;
+}
+
 // Module boilerplate
 static PyMethodDef customcvMethods[] = {
     {"gaussian_blur", (PyCFunction)customCV_gaussian_blur, METH_VARARGS, "Optimized Gaussian Blur"},
     {"find_quads", (PyCFunction)customCV_find_quads, METH_VARARGS, "Filter contours and extract 4 corners"},
+    {"find_contours", (PyCFunction)customCV_find_contours, METH_VARARGS, "Suzuki-Abe Contour Detection"},
     {NULL, NULL, 0, NULL}
 };
 static struct PyModuleDef customCV_module = { PyModuleDef_HEAD_INIT, "customCV", NULL, 0, customcvMethods };

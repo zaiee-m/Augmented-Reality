@@ -207,45 +207,105 @@ def extract_and_draw_final(frame, resizing_factor=3):
     # Using your existing binarization function
     binary = binarization(blurred)
     
-    # return binary
-    
     # 5. Edge Detection
     gradient = detect_edges_binary(binary)
-
-
-    # --- B. EXTRACT CONTOURS ---
-    candidate_contours = extract_contours_from_gradient(gradient)
+    # gradient = cv2.Canny(blurred,100,200)
     
+    # --- B. EXTRACT CONTOURS ---
+    contours, hierarchy = customCV.find_contours(gradient)
+    # contours, hierarchy = cv2.findContours(gradient, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+
+    # corrected_contours = []
+
+    # for cnt in candidate_contours:
+    #     # 1. Swap columns from [y, x] to [x, y]
+    #     # [:, ::-1] is a fast way to reverse the last dimension
+    #     cnt_xy = cnt[:, ::-1]*resizing_factor
+        
+    #     # 2. Reshape to (N, 1, 2) and ensure it's int32
+    #     cnt_formatted = cnt_xy.reshape((-1, 1, 2)).astype(np.int32)
+        
+    #     corrected_contours.append(cnt_formatted)
+
+    l = []
+    corners = []
+
+    # Loop through the hierarchy array (shape (1, N, 4))
+    for i in range(len(contours)):
+
+        # Filter 1: Look for contours with a parent (Parent index is at hierarchy[0][i][3])
+        # Suzuki-Abe parent index != -1 means it is a child/hole
+        parent_id = hierarchy[0][i][3]
+        
+        if parent_id != -1:
+
+            # Filter 2: Centroid Check
+            # Ensure the child and parent share a similar center of mass
+            M1 = cv2.moments(contours[i])
+            M2 = cv2.moments(contours[parent_id])
+            
+            if M1["m00"] != 0 and M2["m00"] != 0:
+                c1 = np.array([int(M1["m10"] / M1["m00"]), int(M1["m01"] / M1["m00"])])
+                c2 = np.array([int(M2["m10"] / M2["m00"]), int(M2["m01"] / M2["m00"])])
+                
+                # Distance threshold to verify alignment (perspective robust)
+                if np.linalg.norm(c1 - c2) < 15:
+
+                    # Filter 3: Check inner portion complexity (10 points specified)
+                    # approxPolyDP uses Douglas-Peucker to simplify vertices
+                    p1 = arc_length(contours[i], True)
+                    approx1 = cv2.approxPolyDP(contours[i], 0.02 * p1, True)
+                    
+                    if len(approx1)>4:
+
+                        # Filter 4: Look for quadrilateral parents (the marker border)
+                        p2 = arc_length(contours[parent_id], True)
+                        approx2 = cv2.approxPolyDP(contours[parent_id], 0.02 * p2, True)
+                        
+                        if len(approx2) == 4:
+                            l.append(i)
+                            l.append(parent_id)
+                            corners.append(approx1)
+                            corners.append(approx2)
+
+
+    filteredContours = [contours[idx] for idx in l]
+    rescaled_contours = [(cnt * resizing_factor).astype(np.int32) for cnt in filteredContours]
+    cv2.drawContours(frame,rescaled_contours,-1,(0,0,255),3)
+
+    # rescaled_contours = [(cnt * resizing_factor).astype(np.int32) for cnt in contours]
+    # cv2.drawContours(frame, rescaled_contours, -1, (0, 255, 0), 3)
+    return frame
+
     # --- C. GEOMETRIC FILTERING ---
     # Filter small noise based on resizing factor
     min_area_thresh = 100 if resizing_factor == 1 else 100/resizing_factor
     
     # Filter for Quadrilaterals (using your custom function)
-    quads = customCV.find_quads(candidate_contours, min_area_thresh)
+    # quads = customCV.find_quads(candidate_contours, min_area_thresh)
     
     # ISOLATE TAGS (The Hierarchy Logic)
     # This keeps valid tags and removes paper borders/data noise
-    valid_tags = isolate_multiple_tags(quads)
-    # valid_tags = quads
+    # valid_tags = isolate_multiple_tags(quads)
 
     # --- D. DECODING & DRAWING ---
     output_frame = frame.copy()
-    
     for tag in valid_tags:
         # 'tag' is a numpy array of [row, col] (y, x) in DOWNSCALED coordinates.
         
         # 1. DECODE ID
         # We use the small binary image and small coordinates for decoding.
         # We must flip [y, x] -> [x, y] for the Homography logic.
-        tag_full_xy = (tag * resizing_factor).astype(np.float32)
+        # tag_full_xy = (tag * resizing_factor).astype(np.float32)
         # Flip [row, col] -> [x, y] for homography
-        tag_full_xy = tag_full_xy[:, ::-1] 
+        # tag_full_xy = tag_full_xy[:, ::-1] 
         
-        tag_full_xy = order_points(tag_full_xy)
+        # tag_full_xy = order_points(tag_full_xy)
 
         # Pass the small binary image to read the bits
         # return decode_tag_id(frame, tag_full_xy)
-        tag_id, angle = decode_tag_id(frame, tag_full_xy)
+        # tag_id, angle = decode_tag_id(frame, tag_full_xy)
     
         # 2. PREPARE DRAWING COORDINATES
         # Upscale: Multiply by resizing factor to map back to 1080p
@@ -254,13 +314,13 @@ def extract_and_draw_final(frame, resizing_factor=3):
         
         # Reshape to standard OpenCV format: (N, 1, 2)
         # We slice [:, ::-1] to flip Y,X to X,Y
-        draw_pts = upscaled_tag[:, ::-1].reshape((-1, 1, 2))
+        # draw_pts = upscaled_tag[:, ::-1].reshape((-1, 1, 2))
         
         # 3. DRAW THE GREEN BOX
-        cv2.polylines(output_frame, [draw_pts], isClosed=True, color=(0, 255, 0), thickness=5)
+        cv2.polylines(output_frame, [upscaled_tag], isClosed=True, color=(0, 255, 0), thickness=5)
 
-        dest_corners = draw_pts.reshape(4, 2).astype(np.float32)
-        template_img = cv2.imread('assets/iitd_logo_template.jpg')
+        # dest_corners = draw_pts.reshape(4, 2).astype(np.float32)
+        # template_img = cv2.imread('assets/iitd_logo_template.jpg')
         # OVERLAY IMAGE
         # Only overlay if you successfully decoded the orientation
 
@@ -269,38 +329,38 @@ def extract_and_draw_final(frame, resizing_factor=3):
         
         # 4. DRAW THE ID TEXT
         # Calculate center of the tag for text placement
-        M = cv2.moments(draw_pts)
-        if M["m00"] != 0:
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
+        # M = cv2.moments(draw_pts)
+        # if M["m00"] != 0:
+        #     cX = int(M["m10"] / M["m00"])
+        #     cY = int(M["m01"] / M["m00"])
         
-            text = f"ID: {tag_id}"
+        #     text = f"ID: {tag_id}"
             
-            # Draw black outline for text readability
-            cv2.putText(output_frame, text, (cX - 40, cY), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
-            # Draw red text
-            cv2.putText(output_frame, text, (cX - 40, cY), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+        #     # Draw black outline for text readability
+        #     cv2.putText(output_frame, text, (cX - 40, cY), 
+        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+        #     # Draw red text
+        #     cv2.putText(output_frame, text, (cX - 40, cY), 
+        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
             
-            # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
-            # You might need to rotate this point based on 'angle' to show true "Up"
+        #     # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
+        #     # You might need to rotate this point based on 'angle' to show true "Up"
 
-            # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
-            if angle == 0:
-                tr_index = 3
-            elif angle == 90:
-                tr_index = 2
-            elif angle == 180:
-                tr_index = 1  # Physical TR is now at Screen Bottom-Left
-            else: # angle == 270
-                tr_index = 0 # Physical TR is now at Screen Bottom-Right
+        #     # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
+        #     if angle == 0:
+        #         tr_index = 3
+        #     elif angle == 90:
+        #         tr_index = 2
+        #     elif angle == 180:
+        #         tr_index = 1  # Physical TR is now at Screen Bottom-Left
+        #     else: # angle == 270
+        #         tr_index = 0 # Physical TR is now at Screen Bottom-Right
 
-            # Extract point and ensure it's a tuple of integers
-            # draw_pts is shape (4, 1, 2), so we access [index][0]
-            tr_point = draw_pts[tr_index][0]
-            corner_pt = tuple(tr_point) # Assuming index 1 is TR
-            cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
+        #     # Extract point and ensure it's a tuple of integers
+        #     # draw_pts is shape (4, 1, 2), so we access [index][0]
+        #     tr_point = draw_pts[tr_index][0]
+        #     corner_pt = tuple(tr_point) # Assuming index 1 is TR
+        #     cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
 
     return output_frame
 
@@ -956,88 +1016,75 @@ def morphological_opening(binary_image, iterations=1):
         
     return img
 
-def extract_contours_from_gradient(edge_image):
-    contours = []
-    h, w = edge_image.shape
-    visited_mask = np.zeros((h, w), dtype=bool)
+def perpendicular_distance(point, line_start, line_end):
+    """Calculates the distance from a point to a line segment."""
+    if np.array_equal(line_start, line_end):
+        return np.linalg.norm(point - line_start)
     
-    # Get all white pixels
-    candidate_points = np.argwhere(edge_image == 255)
+    # Standard formula for distance from point to line (x1,y1) to (x2,y2)
+    return np.abs(np.cross(line_end - line_start, line_start - point)) / np.linalg.norm(line_end - line_start)
 
-    for start_point in candidate_points:
-        y, x = start_point
-        if visited_mask[y, x]: continue
-            
-        # Trace line
-        contour = trace_line_directional(edge_image, tuple(start_point), visited_mask)
-        
-        if len(contour) > 10:
-            contours.append(contour)
-            
-    return contours
+def approx_poly_dp(points, epsilon):
+    """
+    Simplifies a list of points using the Douglas-Peucker algorithm.
+    points: Nx2 numpy array
+    epsilon: distance threshold for simplification
+    """
+    if len(points) < 3:
+        return points
 
-def trace_line_directional(edge_image, start_point, visited_mask):
+    # Find the point with the maximum distance from the line connecting start and end
+    dmax = 0
+    index = 0
+    start_point = points[0]
+    end_point = points[-1]
+
+    for i in range(1, len(points) - 1):
+        d = perpendicular_distance(points[i], start_point, end_point)
+        if d > dmax:
+            index = i
+            dmax = d
+
+    # If max distance is greater than epsilon, recursively simplify
+    if dmax > epsilon:
+        # Recursive calls
+        left_side = approx_poly_dp(points[:index+1], epsilon)
+        right_side = approx_poly_dp(points[index:], epsilon)
+
+        # Build the result list (avoid duplicating the middle point)
+        return np.vstack((left_side[:-1], right_side))
+    else:
+        # All points are close enough; just return the endpoints
+        return np.array([start_point, end_point])
+        
+def arc_length(contour, closed=True):
     """
-    Traces a 1-pixel thick line by prioritizing neighbors that continue 
-    the current direction, preventing diagonal short-circuits.
+    Calculates the perimeter or curve length of a contour.
+    
+    Args:
+        contour: (N, 1, 2) or (N, 2) numpy array of coordinates.
+        closed: Boolean flag to close the loop (add distance from end to start).
     """
-    h, w = edge_image.shape
-    contour = []
-    curr_y, curr_x = start_point
+    # Reshape to (N, 2) for easier coordinate access
+    pts = contour.reshape(-1, 2)
+    num_pts = len(pts)
     
-    contour.append([curr_y, curr_x])
-    visited_mask[curr_y, curr_x] = True
+    if num_pts < 2:
+        return 0.0
+
+    length = 0.0
     
-    # Initial arbitrary direction (doesn't matter for first step)
-    # 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
-    current_dir = 0 
-    
-    # Standard 8-connected offsets
-    offsets = [(-1, 0), (-1, 1), (0, 1), (1, 1), 
-               (1, 0), (1, -1), (0, -1), (-1, -1)]
-    
-    max_steps = 10000
-    steps = 0
-    
-    while True:
-        steps += 1
-        if steps > max_steps: break
-            
-        found_next = False
-        
-        # SEARCH STRATEGY: 
-        # Start looking from the "Forward-Left" neighbor relative to current direction.
-        # This acts like a "Left-Hand Rule" wall follower.
-        # It ensures we follow the outer edge of the line.
-        
-        # If moving North (0), we check NW(7), N(0), NE(1)...
-        start_search_idx = (current_dir + 6) % 8 
-        
-        for i in range(8):
-            # Check neighbors in Clockwise order
-            idx = (start_search_idx + i) % 8
-            dy, dx = offsets[idx]
-            ny, nx = curr_y + dy, curr_x + dx
-            
-            if 0 <= ny < h and 0 <= nx < w:
-                # Is it part of the line?
-                if edge_image[ny, nx] == 255:
-                    
-                    # 1. New Pixel?
-                    if not visited_mask[ny, nx]:
-                        curr_y, curr_x = ny, nx
-                        contour.append([curr_y, curr_x])
-                        visited_mask[curr_y, curr_x] = True
-                        current_dir = idx # Update direction
-                        found_next = True
-                        break
-                    
-                    # 2. Closed Loop?
-                    # Only close if we hit start point AND line is long enough
-                    elif ny == start_point[0] and nx == start_point[1] and len(contour) > 10:
-                        return np.array(contour)
-        
-        if not found_next:
-            break
-            
-    return np.array(contour)
+    # Iterate through each pair of consecutive points
+    for i in range(num_pts - 1):
+        # Euclidean distance formula
+        dist = np.sqrt((pts[i+1, 0] - pts[i, 0])**2 + 
+                       (pts[i+1, 1] - pts[i, 1])**2)
+        length += dist
+
+    # If the curve is a closed loop, add the final segment
+    if closed:
+        dist_to_start = np.sqrt((pts[0, 0] - pts[-1, 0])**2 + 
+                                (pts[0, 1] - pts[-1, 1])**2)
+        length += dist_to_start
+
+    return length

@@ -206,10 +206,10 @@ def extract_and_draw_final(frame, resizing_factor=1):
     # 4. Binarization (Otsu's Method recommended for AR tags)
     # Using your existing binarization function
     binary = binarization(blurred)
-    
+    # return binary
     # 5. Edge Detection
     gradient = detect_edges_binary(binary)
-    # gradient = cv2.Canny(blurred,100,200)
+    # return gradient
     
     # --- B. EXTRACT CONTOURS ---
     contours, hierarchy = customCV.find_contours(gradient)
@@ -319,43 +319,43 @@ def extract_and_draw_final(frame, resizing_factor=1):
         # OVERLAY IMAGE
         # Only overlay if you successfully decoded the orientation
 
-        if tag_id is not None:
-             output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
+        # if tag_id is not None:
+        #      output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
         
         # 4. DRAW THE ID TEXT
         # Calculate center of the tag for text placement
-        # M = cv2.moments(draw_pts)
-        # if M["m00"] != 0:
-        #     cX = int(M["m10"] / M["m00"])
-        #     cY = int(M["m01"] / M["m00"])
+        M = cv2.moments(tag)
+        if M["m00"] != 0:
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
         
-        #     text = f"ID: {tag_id}"
+            text = f"ID: {tag_id}"
             
-        #     # Draw black outline for text readability
-        #     cv2.putText(output_frame, text, (cX - 40, cY), 
-        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
-        #     # Draw red text
-        #     cv2.putText(output_frame, text, (cX - 40, cY), 
-        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+            # Draw black outline for text readability
+            cv2.putText(output_frame, text, (cX - 40, cY), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+            # Draw red text
+            cv2.putText(output_frame, text, (cX - 40, cY), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
             
-        #     # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
-        #     # You might need to rotate this point based on 'angle' to show true "Up"
+            # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
+            # You might need to rotate this point based on 'angle' to show true "Up"
 
-        #     # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
-        #     if angle == 0:
-        #         tr_index = 3
-        #     elif angle == 90:
-        #         tr_index = 2
-        #     elif angle == 180:
-        #         tr_index = 1  # Physical TR is now at Screen Bottom-Left
-        #     else: # angle == 270
-        #         tr_index = 0 # Physical TR is now at Screen Bottom-Right
+            # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
+            if angle == 0:
+                tr_index = 2
+            elif angle == 90:
+                tr_index = 3
+            elif angle == 180:
+                tr_index = 0  # Physical TR is now at Screen Bottom-Left
+            else: # angle == 270
+                tr_index = 1 # Physical TR is now at Screen Bottom-Right
 
-        #     # Extract point and ensure it's a tuple of integers
-        #     # draw_pts is shape (4, 1, 2), so we access [index][0]
-        #     tr_point = draw_pts[tr_index][0]
-        #     corner_pt = tuple(tr_point) # Assuming index 1 is TR
-        #     cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
+            # Extract point and ensure it's a tuple of integers
+            # draw_pts is shape (4, 1, 2), so we access [index][0]
+            tr_point = tag[tr_index][0]
+            corner_pt = tuple(tr_point) # Assuming index 1 is TR
+            cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
 
     return output_frame
 
@@ -377,6 +377,10 @@ def extract_tags(contours, hierarchy):
         # Only process if it has a parent and we haven't already validated this tag
         if parent_id != -1 and parent_id not in processed_parents:
 
+            area_parent = cv2.contourArea(contours[parent_id])
+            if area_parent < 500: # Minimum recognizable size
+                continue
+
             # Filter 2: Centroid Check
             M1 = cv2.moments(contours[i])
             M2 = cv2.moments(contours[parent_id])
@@ -385,17 +389,18 @@ def extract_tags(contours, hierarchy):
                 c1 = np.array([M1["m10"] / M1["m00"], M1["m01"] / M1["m00"]])
                 c2 = np.array([M2["m10"] / M2["m00"], M2["m01"] / M2["m00"]])
                 
-                # Verify centers are close (within 15 pixels)
-                if np.linalg.norm(c1 - c2) < 15:
+                # Verify centers within < 10% of parent's diagonal
+                diagonal_approx = np.sqrt(area_parent)
+                if np.linalg.norm(c1 - c2) < (0.10 * diagonal_approx):
 
                     # Filter 3: Check inner portion complexity
-                    p1 = cv2.arcLength(contours[i], True)
+                    p1 = arc_length(contours[i], True)
                     approx1 = cv2.approxPolyDP(contours[i], 0.02 * p1, True)
                     
                     if len(approx1) > 4:
 
                         # Filter 4: Look for quadrilateral parents (the tag border)
-                        p2 = cv2.arcLength(contours[parent_id], True)
+                        p2 = arc_length(contours[parent_id], True)
                         approx2 = cv2.approxPolyDP(contours[parent_id], 0.02 * p2, True)
                         
                         if len(approx2) == 4:
@@ -561,13 +566,12 @@ def decode_tag_id(frame, corners):
         # Check if the Anchor (2,5) is White (1)
         # AND check if the other corners are Black (0) to reduce false positives
         # Corners: TL(2,2), TR(2,5), BR(5,5), BL(5,2)
-        is_anchor_white = (grid[2, 5] == 1)
+        is_anchor_white = (grid[5, 5] == 1)
         
         # Optional: strictly check other corners are black (if your tag design follows that)
         # For now, we trust the single white anchor.
         if is_anchor_white:
             orientation = angle
-            print(angle)
             found = True 
             break
         else:
@@ -581,10 +585,10 @@ def decode_tag_id(frame, corners):
     # Grid: (3,3), (3,4), (4,3), (4,4)
     bit1 = grid[3, 3]
     bit2 = grid[3, 4]
-    bit3 = grid[4, 3]
-    bit4 = grid[4, 4]
+    bit3 = grid[4, 4]
+    bit4 = grid[4, 3]
     
-    tag_id = (bit1 << 3) | (bit2 << 2) | (bit3 << 1) | bit4
+    tag_id = (bit4 << 3) | (bit3 << 2) | (bit2 << 1) | bit1
 
     # M = cv2.moments(dst_pts)
     # if M["m00"] != 0:
@@ -752,25 +756,29 @@ def get_perspective_transform(src, dst):
     return M
 
 def order_points(pts):
-    """
-    Orders coordinates: Top-Left, Bottom-Left, Bottom-Right, Top-Right.
-
-    Expects inputs in xy format and returns in xy aswell.
-    """
-    rect = np.zeros((4, 2), dtype="float32")
+    # Step 1: Sort the points based on their x-coordinates
+    # Reshape to ensure (4, 2)
     pts = pts.reshape(4, 2)
     
-    # Sum: TL has min sum, BR has max sum
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    
-    # Diff: BL has min diff (x-y), TR has max diff (x-y)
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    
-    return rect
+    # Sort by X to separate left-side points from right-side points
+    xSorted = pts[pts[:, 0].argsort()]
+
+    # Step 2: Grab the left-most and right-most points
+    leftMost = xSorted[:2, :]
+    rightMost = xSorted[2:, :]
+
+    # Step 3: Sort the left-most coordinates according to their y-coordinates
+    # Smallest Y is Top-Left, Largest Y is Bottom-Left
+    leftMost = leftMost[leftMost[:, 1].argsort()]
+    (tl, bl) = leftMost
+
+    # Step 4: Sort the right-most coordinates according to their y-coordinates
+    # Smallest Y is Top-Right, Largest Y is Bottom-Right
+    rightMost = rightMost[rightMost[:, 1].argsort()]
+    (tr, br) = rightMost
+
+    # Return in requested order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+    return np.array([tl, tr, br, bl], dtype="float32")
 
 def binarization(gray_image):
     """

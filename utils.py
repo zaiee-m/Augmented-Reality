@@ -250,9 +250,21 @@ def detect_edges_binary(binary_image):
     
     return edge_image
 
-def extract_and_draw_final(frame, resizing_factor=1):
+def extract_and_draw_ar_tags(frame, resizing_factor=1):
+    """
+    Extracts ar tags from an RGB frame.
     
-    # --- A. PREPROCESSING ---
+    Args:
+        frame: RGB frame in np(N,1,3) format.
+        resizing_factor: factor to be used to scale image for resizing.
+
+    Returns:
+        frame, tags tuple
+        tags: all the extracts tags as a list of np(N,2) arrays in xy format.
+        frame: video frame with tag boundaries drawn for visualisation.
+    """
+
+        # --- A. PREPROCESSING ---
     # 1. Downscale for speed
     small_frame = frame[::resizing_factor, ::resizing_factor]
 
@@ -276,36 +288,122 @@ def extract_and_draw_final(frame, resizing_factor=1):
 
     tags = extract_tags(contours,hierarchy)
 
-
     corrected_contours = []
 
     for cnt in tags:
-        # 1. Swap columns from [y, x] to [x, y]
-        # [:, ::-1] is a fast way to reverse the last dimension
-        # cnt_xy = cnt[:, ::-1]*resizing_factor
-        
-        # 2. Reshape to (N, 1, 2) and ensure it's int32
+        # Reshape to (N, 1, 2) and ensure it's int32.
         cnt_formatted = cnt.reshape((-1, 1, 2)).astype(np.int32)
         
         corrected_contours.append(cnt_formatted)
 
-
     cv2.drawContours(frame,corrected_contours,-1,(0,255,0),3)
 
+    return frame, tags
 
-    # --- C. GEOMETRIC FILTERING ---
+def detect_tags_in_image(frame, resizing_factor=1):
+    """
+    Docstring for detect_and_draw_tags
+    
+    :param frame: Description
+    :param resizing_factor: Description
+    """
+    # Extract and draw ar tags.
+    frame_with_contours_drawn, tags = extract_and_draw_ar_tags(frame, resizing_factor=resizing_factor)
+
     # Filter small noise based on resizing factor
     min_area_thresh = 100 if resizing_factor == 1 else 100/resizing_factor
-    
 
-    # --- D. DECODING & DRAWING ---
-    output_frame = frame.copy()
-    obj_3d = OBJ("assets/model3.obj")
+    output_frame = frame_with_contours_drawn
+
+    for tag in tags:
+        # Extact tag_id and orientation of the corner cell.
+        # For e.g. angle=90 means the tag is rotated 90 degrees
+        # clockwise from the correct orientation (white cell as bottom right).
+        tag_id, angle = decode_tag_id(frame, tag)
+
+        # For tag_id visualization.
+        cX, cY = get_polygon_centroid(tag)
+    
+        text = f"ID: {tag_id}"
+        
+        # Draw black outline for text readability
+        cv2.putText(output_frame, text, (cX - 40, cY), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+        # Draw red text
+        cv2.putText(output_frame, text, (cX - 40, cY), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+        
+        # Draw Orientation Corner (Blue Dot at Bottom-Right)
+        # Rotate this point based on 'angle' to show true "Up".
+
+        # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
+        # Points in tag are in TL, BL, BR, TR order.
+        if angle == 0:
+            tr_index = 2
+        elif angle == 90:
+            tr_index = 3
+        elif angle == 180:
+            tr_index = 0  # Physical TR is now at Screen Bottom-Left
+        else: # angle == 270
+            tr_index = 1 # Physical TR is now at Screen Bottom-Right
+
+        # Extract point and ensure it's a tuple of integers
+        # draw_pts is shape (4, 2).
+        tr_point = tag[tr_index]
+        corner_pt = tuple(tr_point) # Assuming index 1 is TR
+        cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
+
+    return output_frame 
+
+def overlay_image(frame, template_path):
+    """
+    Docstring for overlay_image
+    
+    :param frame: Description
+    :param template: Description
+    """
+
+    # Load template image.
+    template_img = cv2.imread(template_path)
+
+    if template_img is None:
+        raise FileNotFoundError("Could not load image at 'assets/iitd_logo_template.jpg'. Check the path and file integrity.")
+    
+    frame_with_ar_tag, tags = extract_and_draw_ar_tags(frame)
+
+    output_frame = frame_with_ar_tag
+
+    for tag in tags:
+        # Determine current tag orientation.
+        _, angle = decode_tag_id(frame, tag)
+
+        # Reshape just in case.
+        dest_corners = tag.reshape(4, 2).astype(np.float32)
+
+        # Superimpose image onto the tag in angle orientation.
+        output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
+    
+    return output_frame
+
+def overlay_object(frame, object_path):
+    """
+    Overlays a 3d .obj file onto an ar tag in the frame.
+    
+    Args:
+        frame: video frame to be overlaid.
+        object_path: path to the object to be overlaid.
+    """
+
+    # Extract and draw ar tags in the frame.
+    frame_with_ar_tag, tags = extract_and_draw_ar_tags(frame)
+    output_frame = frame_with_ar_tag
+
+    # Load the 3d object file.
+    obj_3d = OBJ(object_path)
     square_size = 100
     dummy_model_surface = np.zeros((square_size, square_size), dtype=np.uint8)
-    K = np.array([[1.40118749e+03, 0.00000000e+00, 9.92369731e+02],
-                  [0.00000000e+00, 1.40276745e+03, 5.73505173e+02],
-                  [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
+
+    mtx, _ = load_calibration()
 
     dst_points = np.array([
         [0, 0],
@@ -322,14 +420,13 @@ def extract_and_draw_final(frame, resizing_factor=1):
 
         if tag_id is not None:
             
-            # --- FIX 1: SWAP ARGUMENTS ---
+    
             # We map World (dst_points) -> Image (dest_corners)
             H = get_perspective_transform(dst_points, dest_corners)
             
             # This will now return a valid Projection Matrix
-            P = get_projection_matrix(H=H, K=K)
+            P = get_projection_matrix(H=H, K=mtx)
             
-            # --- FIX 2: Correct Model Reference ---
             # Pass the dummy surface so the object centers at (50, 50)
             # instead of (1, 2)
             output_frame = render(
@@ -341,50 +438,67 @@ def extract_and_draw_final(frame, resizing_factor=1):
                 orientation=angle
             )
 
-        # if tag_id is not None:
-        #      output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
-        
-        # 4. DRAW THE ID TEXT
-        # Calculate center of the tag for text placement
-        # M = cv2.moments(tag)
-        # if M["m00"] != 0:
-        #     cX = int(M["m10"] / M["m00"])
-        #     cY = int(M["m01"] / M["m00"])
-        
-        #     text = f"ID: {tag_id}"
-            
-        #     # Draw black outline for text readability
-        #     cv2.putText(output_frame, text, (cX - 40, cY), 
-        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
-        #     # Draw red text
-        #     cv2.putText(output_frame, text, (cX - 40, cY), 
-        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-            
-        #     # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
-        #     # You might need to rotate this point based on 'angle' to show true "Up"
-
-        #     # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
-        #     if angle == 0:
-        #         tr_index = 2
-        #     elif angle == 90:
-        #         tr_index = 3
-        #     elif angle == 180:
-        #         tr_index = 0  # Physical TR is now at Screen Bottom-Left
-        #     else: # angle == 270
-        #         tr_index = 1 # Physical TR is now at Screen Bottom-Right
-
-        #     # Extract point and ensure it's a tuple of integers
-        #     # draw_pts is shape (4, 1, 2), so we access [index][0]
-        #     tr_point = tag[tr_index][0]
-        #     corner_pt = tuple(tr_point) # Assuming index 1 is TR
-        #     cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
-
     return output_frame
+
+def get_polygon_centroid(contour):
+    """
+    Calculates the centroid using Green's Theorem (the "Shoelace Formula").
+    
+    Args:
+        contour: Points representing the contour in np.array(N,1,2) or np.array(N,2) format.
+
+    Returns:
+        centroid: tuple of numbers representing the centroid in xy
+    """
+    #  Flatten and ensure float type for precision
+    pts = contour.reshape(-1, 2).astype(np.float32)
+    n = len(pts)
+    
+    # Needs at least a triangle
+    if n < 3:
+        return np.mean(pts, axis=0).astype(int) # Fallback
+
+    #  Vectorized Shift (Roll)
+    # x represents x_i, x_next represents x_{i+1}
+    x = pts[:, 0]
+    y = pts[:, 1]
+    
+    # Shift arrays by -1 (move index 1 to 0, wrap last to first)
+    x_next = np.roll(x, -1)
+    y_next = np.roll(y, -1)
+    
+    # 3. Compute Cross Product Term (Vectorized)
+    # (x_i * y_{i+1} - x_{i+1} * y_i)
+    cross_term = x * y_next - x_next * y
+    
+    #  Compute Sums
+    # Note: This 'area_sum' is actually 2 * SignedArea
+    area_sum = np.sum(cross_term)
+    
+    # Avoid division by zero
+    if abs(area_sum) < 1e-6:
+        return np.mean(pts, axis=0).astype(int)
+    
+    # Compute Centroids
+    cx = np.sum((x + x_next) * cross_term)
+    cy = np.sum((y + y_next) * cross_term)
+    
+    # Formula: C = Sum / (6 * SignedArea)
+    # Since area_sum = 2 * SignedArea, we divide by 3 * area_sum
+    cx = cx / (3.0 * area_sum)
+    cy = cy / (3.0 * area_sum)
+    
+    return int(cx), int(cy)
+
 
 def extract_tags(contours, hierarchy):
     """
-    Analyzes contours and hierarchy to find nested tags and return ordered corners.
+    Docstring for extract_tags
+    
+    :param contours: Description
+    :param hierarchy: Description
     """
+    
     all_tag_corners = []
     processed_parents = set()
 
@@ -428,7 +542,7 @@ def extract_tags(contours, hierarchy):
                         if len(approx2) == 4:
                             # Order the 4 corners of the parent (the tag)
                             ordered_corners = order_points(approx2)
-                            all_tag_corners.append(ordered_corners)
+                            all_tag_corners.append(ordered_corners.astype(np.int32))
                             
                             # Mark parent as processed to avoid duplicate detection
                             processed_parents.add(parent_id)
@@ -437,12 +551,15 @@ def extract_tags(contours, hierarchy):
 
 def superimpose_image(frame, tag_corners, template_image, orientation_angle):
     """
-    Overlays a template image onto the detected AR tag, respecting orientation.
+    Docstring for superimpose_image
+    
+    :param frame: Description
+    :param tag_corners: Description
+    :param template_image: Description
+    :param orientation_angle: Description
     """
-    if template_image is None:
-        return frame
         
-    # 1. Prepare Source Points (The Template Image Corners)
+    # Prepare Source Points (The Template Image Corners)
     # Order: Top-Left, Bottom-Left, Bottom-Right, Top-Right.
     h_temp, w_temp = template_image.shape[:2]
     src_pts = np.array([
@@ -452,26 +569,14 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
         [0, h_temp - 1]             # Index 3: Bottom-Left
     ], dtype=np.float32)
 
-    # 2. Prepare Destination Points (The Tag on Screen)
-    # We must order the detected corners to match the template order (TL, BL, BR, TR).
+    # Prepare Destination Points (The Tag on Screen)
+    # We must order the detected corners to match the template order (TL, TR, BR, BL).
     # First, get them in the standard geometric order.
     dst_pts = order_points(tag_corners)
     
-    # 3. Adjust for Orientation
+    # Adjust for Orientation
     # The 'orientation_angle' tells us how much the tag is rotated.
     # We shift the destination corners list so that index 0 is always the "True Top-Left".
-    
-    # Logic:
-    # 0 deg   -> Anchor is TR. No shift needed.
-    # 90 deg  -> Anchor is TL. Shift 1.
-    # 180 deg -> Anchor is BL. Shift 2.
-    # 270 deg -> Anchor is BR. Shift 3.
-
-    # Logic:
-    # 0 deg   -> Anchor is TR. No shift needed.
-    # 90 deg  -> Anchor is BR. Shift 1.
-    # 180 deg -> Anchor is BL. Shift 2.
-    # 270 deg -> Anchor is TL. Shift 3.
     
     shift_amount = 0
     if orientation_angle == 90:
@@ -519,7 +624,10 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
 
 def decode_tag_id(frame, corners):
     """
-    Robust decoding with Center Sampling and Adaptive Thresholding.
+    Docstring for decode_tag_id
+    
+    :param frame: Description
+    :param corners: Description
     """
     # 1. Perspective Transform
     # Use a fixed size (e.g., 200px)
@@ -539,18 +647,7 @@ def decode_tag_id(frame, corners):
     if len(warped.shape) == 3 and warped.shape[2] == 3:
         warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
-    # return warped
-
-    # 2. CRITICAL FIX: Re-Threshold the Warped Tag
-    # Sometimes lighting varies across the tag. We enforce strict Black/White
-    # on the warped image itself. Otsu is safest here.
-    # Note: binary_image should be uint8.
-    _, warped_bin = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-
-    # DEBUG: Un-comment this to see exactly what the decoder sees!
-    # If this looks like a white blob, your corners are detecting the Paper, not the Tag.
-    # cv2.imshow("Debug Warped Tag", warped_bin) 
+    warped_bin = binarization(warped)
 
     # 3. Read the Grid using CENTER SAMPLING
     grid = np.zeros((8, 8), dtype=int)
@@ -590,8 +687,6 @@ def decode_tag_id(frame, corners):
         # Corners: TL(2,2), TR(2,5), BR(5,5), BL(5,2)
         is_anchor_white = (grid[5, 5] == 1)
         
-        # Optional: strictly check other corners are black (if your tag design follows that)
-        # For now, we trust the single white anchor.
         if is_anchor_white:
             orientation = angle
             found = True 
@@ -612,20 +707,6 @@ def decode_tag_id(frame, corners):
     
     tag_id = (bit4 << 3) | (bit3 << 2) | (bit2 << 1) | bit1
 
-    # M = cv2.moments(dst_pts)
-    # if M["m00"] != 0:
-    #     cX = int(M["m10"] / M["m00"])
-    #     cY = int(M["m01"] / M["m00"])
-    
-    #     text = f"A: {angle}"
-        
-    #     # Draw black outline for text readability
-    #     cv2.putText(warped_bin, text, (cX - 40, cY), 
-    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
-    #     # Draw red text
-    #     cv2.putText(warped_bin, text, (cX - 40, cY), 
-    #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-    # return warped_bin
     return tag_id, orientation
 
 def warp_perspective_manual(img, M, dsize):
@@ -778,28 +859,37 @@ def get_perspective_transform(src, dst):
     return M
 
 def order_points(pts):
-    # Step 1: Sort the points based on their x-coordinates
+    """
+    Orders points in TL, TR, BR, BL order.
+    
+    Args:
+        pts: np.array(4,2) of points.
+    
+    Returns:
+        pts: np.array(4,2, dtype="float32") in correct order.
+    """
+    # Sort the points based on their x-coordinates
     # Reshape to ensure (4, 2)
     pts = pts.reshape(4, 2)
     
     # Sort by X to separate left-side points from right-side points
     xSorted = pts[pts[:, 0].argsort()]
 
-    # Step 2: Grab the left-most and right-most points
+    # Grab the left-most and right-most points
     leftMost = xSorted[:2, :]
     rightMost = xSorted[2:, :]
 
-    # Step 3: Sort the left-most coordinates according to their y-coordinates
+    # Sort the left-most coordinates according to their y-coordinates
     # Smallest Y is Top-Left, Largest Y is Bottom-Left
     leftMost = leftMost[leftMost[:, 1].argsort()]
     (tl, bl) = leftMost
 
-    # Step 4: Sort the right-most coordinates according to their y-coordinates
+    # Sort the right-most coordinates according to their y-coordinates
     # Smallest Y is Top-Right, Largest Y is Bottom-Right
     rightMost = rightMost[rightMost[:, 1].argsort()]
     (tr, br) = rightMost
 
-    # Return in requested order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
+    # Order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
     return np.array([tl, tr, br, bl], dtype="float32")
 
 def binarization(gray_image):
@@ -856,11 +946,9 @@ def binarization(gray_image):
     binary_image = np.zeros((h, w), dtype=np.uint8)
     binary_image[gray_image > optimal_threshold] = 255
 
-    close_gaps(binary_image, iterations=1)
+    # close_gaps(binary_image, iterations=1)
 
     return binary_image
-
-
 
 def to_grayscale(image):
     """
@@ -1114,3 +1202,21 @@ def manual_project_points(P, vertices):
     v = projected_homo[:, 1] / z
     
     return np.column_stack((u, v))
+
+def load_calibration(filepath="camera_calibration.npz"):
+    """
+    Loads camera matrix and distortion coefficients from a file.
+    
+    Args:
+        filepath: path of the intrinsics file.
+
+    Returns:
+        mtx: the camera matrix K.
+        dist: the distortion coefficients.
+    """
+
+    
+    with np.load(filepath) as data:
+        mtx = data['mtx']
+        dist = data['dist']
+    return mtx, dist

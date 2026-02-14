@@ -23,7 +23,7 @@ objp[0,:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
 objp *= SQUARE_SIZE
 
 # 3. PROCESSING IMAGES
-images = glob.glob('calibration_images/*.jpg')
+images = glob.glob('assets/calibration_images/*.jpg')
 
 for fname in images:
     img = cv2.imread(fname)
@@ -52,4 +52,10 @@ cv2.destroyAllWindows()
 ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
 
 print("Camera matrix:\n", mtx)
-print("\nDistortion coefficients:\n", dist)
+print("\nDistortion coefficients:\n", dist)\
+
+# --- SAVE DATA ---
+# Save the camera matrix and distortion coefficients to a file
+np.savez("camera_calibration.npz", mtx=mtx, dist=dist, rvecs=rvecs, tvecs=tvecs)
+
+print("Calibration data saved to 'camera_calibration.npz'")

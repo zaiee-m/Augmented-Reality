@@ -3,7 +3,7 @@ import os
 
 # 1. SETTINGS
 # Create a folder to save images if it doesn't exist
-folder = 'calibration_images'
+folder = os.path.join('assets', 'calibration_images')
 if not os.path.exists(folder):
     os.makedirs(folder)
 

@@ -1,3 +1,6 @@
+customCV.cpython-313-darwin.so
+camera_calibration.npz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

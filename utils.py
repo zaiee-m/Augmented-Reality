@@ -92,37 +92,97 @@ def hex_to_rgb(hex_color):
     h_len = len(hex_color)
     return tuple(int(hex_color[i:i + h_len // 3], 16) for i in range(0, h_len, h_len // 3))
 
-def render(img, obj, projection, model, color=False):
+def render(img, obj, projection, model, orientation=0, color=False):
     """
-    Render a loaded obj model into the current video frame.
-
     Args:
-        img: The current video frame.
-        obj: The loaded OBJ model.
-        projection: The 3D projection matrix.
-        model: The reference image representing the surface to be augmented.
-        color: Whether to render in color. Defaults to False.
+        orientation: The angle of the tag (0, 90, 180, 270)
     """
-    DEFAULT_COLOR = (0, 0, 0)
-    vertices = obj.vertices
-    scale_matrix = np.eye(3) * 3
-    h, w = model.shape
+    h, w = model.shape[:2]
 
+    # --- 1. SETUP ROTATION MATRICES ---
+    
+    # A. Tag Orientation (Dynamic): Rotates model around Z-axis to match tag
+    # We negate the angle because OpenCV's y-axis is inverted relative to standard math
+    angle_rad = math.radians(-orientation) 
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    
+    # Rotation around Z-axis
+    R_tag = np.array([
+        [cos_a, -sin_a, 0],
+        [sin_a,  cos_a, 0],
+        [0,      0,     1]
+    ])
+
+    # B. Model Correction (Static): Fixes "Sideways" or "Lying Down" models
+    # Try changing 'rx' to 0 or 180 if the wolf is still sideways!
+    # Common OBJ fix: Rotate 90 degrees around X to stand it up.
+    rx = math.radians(90) 
+    
+    R_model_fix = np.array([
+        [1, 0, 0],
+        [0, math.cos(rx), -math.sin(rx)],
+        [0, math.sin(rx), math.cos(rx)]
+    ])
+
+    # --- 2. AUTO-SCALE ---
+    vertices = np.array(obj.vertices)
+    # Center the model vertices around (0,0,0) first
+    object_center = (np.max(vertices, axis=0) + np.min(vertices, axis=0)) / 2.0
+    vertices = vertices - object_center
+    
+    # Scale to fit inside the 100x100 world
+    max_dim = np.max(np.max(vertices, axis=0) - np.min(vertices, axis=0))
+    scale_factor = (w * 0.8) / (max_dim if max_dim > 0 else 1)
+    scale_matrix = np.eye(3) * scale_factor
+
+    # --- 3. PROCESSING LOOP ---
     for face in obj.faces:
         face_vertices = face[0]
         points = np.array([vertices[vertex - 1] for vertex in face_vertices])
+        
+        # TRANSFORMATION CHAIN:
+        # 1. Scale the model
         points = np.dot(points, scale_matrix)
-        points = np.array([[p[0] + w / 2, p[1] + h / 2, p[2]] for p in points])
-        dst = cv2.perspectiveTransform(points.reshape(-1, 1, 3), projection)
-        imgpts = np.int32(dst)
-        if color is False:
-            cv2.fillConvexPoly(img, imgpts, DEFAULT_COLOR)
+        
+        # 2. Fix the Model's native orientation (Stand it up)
+        points = np.dot(points, R_model_fix)
+        
+        # 3. Apply Tag Orientation (Rotate with the physical paper)
+        points = np.dot(points, R_tag)
+        
+        # 4. Move to Center of the Tag (World Translation)
+        # We assume the tag is at Z=0. We lift the model up by half its height so it stands ON the tag.
+        points = np.array([[p[0] + w/2, p[1] + h/2, p[2]] for p in points])
+
+        # --- 4. PROJECTION ---
+        points_homo = np.hstack((points, np.ones((len(points), 1))))
+        projected = np.dot(projection, points_homo.T)
+        
+        z = projected[2, :]
+        # Clip points behind camera to avoid "Dark Frame" glitches
+        if np.any(z <= 0.1): continue
+            
+        u = projected[0, :] / z
+        v = projected[1, :] / z
+        imgpts = np.vstack((u, v)).T.astype(np.int32)
+
+        # --- 5. DRAW ---
+        if color:
+             try:
+                # If face[-1] is a hex string (standard)
+                if isinstance(face[-1], str):
+                    c = hex_to_rgb(face[-1])[::-1]
+                    cv2.fillConvexPoly(img, imgpts, c)
+                else:
+                    # Fallback for generic OBJ
+                    cv2.fillConvexPoly(img, imgpts, (100, 200, 100)) 
+             except:
+                cv2.fillConvexPoly(img, imgpts, (0, 0, 255))
         else:
-            color = hex_to_rgb(face[-1])
-            color = color[::-1]
-            cv2.fillConvexPoly(img, imgpts, color)
+            cv2.fillConvexPoly(img, imgpts, (0, 0, 0))
 
     return img
+
 
 def draw_line(image, start, end, color=(0, 255, 0)):
     """
@@ -229,55 +289,9 @@ def extract_and_draw_final(frame, resizing_factor=1):
         
         corrected_contours.append(cnt_formatted)
 
-    # l = []
-    # corners = []
 
-    # # Loop through the hierarchy array (shape (1, N, 4))
-    # for i in range(len(contours)):
-
-    #     # Filter 1: Look for contours with a parent (Parent index is at hierarchy[0][i][3])
-    #     # Suzuki-Abe parent index != -1 means it is a child/hole
-    #     parent_id = hierarchy[0][i][3]
-        
-    #     if parent_id != -1:
-
-    #         # Filter 2: Centroid Check
-    #         # Ensure the child and parent share a similar center of mass
-    #         M1 = cv2.moments(contours[i])
-    #         M2 = cv2.moments(contours[parent_id])
-            
-    #         if M1["m00"] != 0 and M2["m00"] != 0:
-    #             c1 = np.array([int(M1["m10"] / M1["m00"]), int(M1["m01"] / M1["m00"])])
-    #             c2 = np.array([int(M2["m10"] / M2["m00"]), int(M2["m01"] / M2["m00"])])
-                
-    #             # Distance threshold to verify alignment (perspective robust)
-    #             if np.linalg.norm(c1 - c2) < 15:
-
-    #                 # Filter 3: Check inner portion complexity (10 points specified)
-    #                 # approxPolyDP uses Douglas-Peucker to simplify vertices
-    #                 p1 = arc_length(contours[i], True)
-    #                 approx1 = cv2.approxPolyDP(contours[i], 0.02 * p1, True)
-                    
-    #                 if len(approx1)>4:
-
-    #                     # Filter 4: Look for quadrilateral parents (the marker border)
-    #                     p2 = arc_length(contours[parent_id], True)
-    #                     approx2 = cv2.approxPolyDP(contours[parent_id], 0.02 * p2, True)
-                        
-    #                     if len(approx2) == 4:
-    #                         l.append(i)
-    #                         l.append(parent_id)
-    #                         corners.append(approx1)
-    #                         corners.append(approx2)
-
-
-    # filteredContours = [contours[idx] for idx in l]
-    # rescaled_contours = [(cnt * resizing_factor).astype(np.int32) for cnt in filteredContours]
     cv2.drawContours(frame,corrected_contours,-1,(0,255,0),3)
 
-    # rescaled_contours = [(cnt * resizing_factor).astype(np.int32) for cnt in contours]
-    # cv2.drawContours(frame, rescaled_contours, -1, (0, 255, 0), 3)
-    # return frame
 
     # --- C. GEOMETRIC FILTERING ---
     # Filter small noise based on resizing factor
@@ -286,76 +300,84 @@ def extract_and_draw_final(frame, resizing_factor=1):
 
     # --- D. DECODING & DRAWING ---
     output_frame = frame.copy()
-    for tag in corrected_contours:
-        # 'tag' is a numpy array of [row, col] (y, x) in DOWNSCALED coordinates.
-        
-        # 1. DECODE ID
-        # We use the small binary image and small coordinates for decoding.
-        # We must flip [y, x] -> [x, y] for the Homography logic.
-        # tag_full_xy = (tag * resizing_factor).astype(np.float32)
-        # Flip [row, col] -> [x, y] for homography
-        # tag_full_xy = tag_full_xy[:, ::-1] 
-        
-        # tag_full_xy = order_points(tag_full_xy)
+    obj_3d = OBJ("assets/model3.obj")
+    square_size = 100
+    dummy_model_surface = np.zeros((square_size, square_size), dtype=np.uint8)
+    K = np.array([[1.40118749e+03, 0.00000000e+00, 9.92369731e+02],
+                  [0.00000000e+00, 1.40276745e+03, 5.73505173e+02],
+                  [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
 
-        # Pass the small binary image to read the bits
-        # return decode_tag_id(frame, tag_full_xy)
+    dst_points = np.array([
+        [0, 0],
+        [square_size, 0],
+        [square_size, square_size],
+        [0, square_size]
+    ], dtype=np.float32)
+
+    for tag in tags:
         tag_id, angle = decode_tag_id(frame, tag)
-    
-        # 2. PREPARE DRAWING COORDINATES
-        # Upscale: Multiply by resizing factor to map back to 1080p
-        # Flip: Ensure we have [x, y] for OpenCV drawing functions
-        # upscaled_tag = (tag * resizing_factor).astype(np.int32)
-        
-        # Reshape to standard OpenCV format: (N, 1, 2)
-        # We slice [:, ::-1] to flip Y,X to X,Y
-        # draw_pts = upscaled_tag[:, ::-1].reshape((-1, 1, 2))
-        
-        # 3. DRAW THE GREEN BOX
-        # cv2.polylines(output_frame, [upscaled_tag], isClosed=True, color=(0, 255, 0), thickness=5)
 
+        # Convert detected corners to float32
         dest_corners = tag.reshape(4, 2).astype(np.float32)
-        template_img = cv2.imread('assets/iitd_logo_template.jpg')
-        # OVERLAY IMAGE
-        # Only overlay if you successfully decoded the orientation
+
+        if tag_id is not None:
+            
+            # --- FIX 1: SWAP ARGUMENTS ---
+            # We map World (dst_points) -> Image (dest_corners)
+            H = get_perspective_transform(dst_points, dest_corners)
+            
+            # This will now return a valid Projection Matrix
+            P = get_projection_matrix(H=H, K=K)
+            
+            # --- FIX 2: Correct Model Reference ---
+            # Pass the dummy surface so the object centers at (50, 50)
+            # instead of (1, 2)
+            output_frame = render(
+                img=output_frame, 
+                obj=obj_3d, 
+                projection=P, 
+                model=dummy_model_surface, 
+                color=False,
+                orientation=angle
+            )
 
         # if tag_id is not None:
         #      output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
         
         # 4. DRAW THE ID TEXT
         # Calculate center of the tag for text placement
-        M = cv2.moments(tag)
-        if M["m00"] != 0:
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
+        # M = cv2.moments(tag)
+        # if M["m00"] != 0:
+        #     cX = int(M["m10"] / M["m00"])
+        #     cY = int(M["m01"] / M["m00"])
         
-            text = f"ID: {tag_id}"
+        #     text = f"ID: {tag_id}"
             
-            # Draw black outline for text readability
-            cv2.putText(output_frame, text, (cX - 40, cY), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
-            # Draw red text
-            cv2.putText(output_frame, text, (cX - 40, cY), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+        #     # Draw black outline for text readability
+        #     cv2.putText(output_frame, text, (cX - 40, cY), 
+        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+        #     # Draw red text
+        #     cv2.putText(output_frame, text, (cX - 40, cY), 
+        #                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
             
-            # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
-            # You might need to rotate this point based on 'angle' to show true "Up"
+        #     # Optional: Draw Orientation Corner (Blue Dot at Top-Right)
+        #     # You might need to rotate this point based on 'angle' to show true "Up"
 
-            # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
-            if angle == 0:
-                tr_index = 2
-            elif angle == 90:
-                tr_index = 3
-            elif angle == 180:
-                tr_index = 0  # Physical TR is now at Screen Bottom-Left
-            else: # angle == 270
-                tr_index = 1 # Physical TR is now at Screen Bottom-Right
+        #     # Visualizing the Orientation (Blue Dot on the Tag's Top-Right Corner)
+        #     if angle == 0:
+        #         tr_index = 2
+        #     elif angle == 90:
+        #         tr_index = 3
+        #     elif angle == 180:
+        #         tr_index = 0  # Physical TR is now at Screen Bottom-Left
+        #     else: # angle == 270
+        #         tr_index = 1 # Physical TR is now at Screen Bottom-Right
 
-            # Extract point and ensure it's a tuple of integers
-            # draw_pts is shape (4, 1, 2), so we access [index][0]
-            tr_point = tag[tr_index][0]
-            corner_pt = tuple(tr_point) # Assuming index 1 is TR
-            cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
+        #     # Extract point and ensure it's a tuple of integers
+        #     # draw_pts is shape (4, 1, 2), so we access [index][0]
+        #     tr_point = tag[tr_index][0]
+        #     corner_pt = tuple(tr_point) # Assuming index 1 is TR
+        #     cv2.circle(output_frame, corner_pt, 10, (255, 0, 0), -1)
 
     return output_frame
 
@@ -1026,3 +1048,69 @@ def arc_length(contour, closed=True):
         length += dist_to_start
 
     return length
+
+def get_projection_matrix(H, K):
+    """
+    Extracts the Rotation (R) and Translation (t) from Homography and Intrinsic K.
+    Returns the 3x4 Projection Matrix P = K * [R|t].
+
+    Args:
+        H:
+        K:
+
+    Returns:
+        P: 
+    """
+    h1 = H[:, 0]
+    h2 = H[:, 1]
+    h3 = H[:, 2]
+    
+    K_inv = np.linalg.inv(K)
+    
+    # Recover scale factor lambda
+    # We use the average of the norms of the first two columns to be more robust
+    lambda_1 = 1 / np.linalg.norm(np.dot(K_inv, h1))
+    lambda_2 = 1 / np.linalg.norm(np.dot(K_inv, h2))
+    lambda_val = (lambda_1 + lambda_2) / 2
+    
+    # Recover R and t
+    r1 = lambda_val * np.dot(K_inv, h1)
+    r2 = lambda_val * np.dot(K_inv, h2)
+    t  = lambda_val * np.dot(K_inv, h3)
+    
+    # Recover r3 (orthogonality: r3 = r1 x r2)
+    r3 = np.cross(r1, r2)
+    
+    # Assemble Rotation Matrix
+    R = np.column_stack((r1, r2, r3))
+    
+    # Combine to form Extrinsics [R|t]
+    extrinsics = np.column_stack((R, t))
+    
+    # Compute Projection Matrix P = K * [R|t]
+    P = np.dot(K, extrinsics)
+    return P
+
+def manual_project_points(P, vertices):
+    """
+    Projects 3D vertices to 2D using matrix P.
+    Replaces cv2.projectPoints.
+    """
+    # 1. Add homogeneous coordinate (w=1) to 3D points
+    # vertices shape: (N, 3) -> (N, 4)
+    ones = np.ones((vertices.shape[0], 1))
+    vertices_homo = np.hstack([vertices, ones])
+    
+    # 2. Project: x = P * X
+    # (3, 4) dot (4, N) -> (3, N) -> Transpose to (N, 3)
+    projected_homo = np.dot(P, vertices_homo.T).T
+    
+    # 3. Normalize by Z (perspective division)
+    # Avoid division by zero
+    z = projected_homo[:, 2]
+    z[z == 0] = 1e-10 
+    
+    u = projected_homo[:, 0] / z
+    v = projected_homo[:, 1] / z
+    
+    return np.column_stack((u, v))

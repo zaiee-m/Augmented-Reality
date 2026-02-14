@@ -1,141 +1,130 @@
-Gemini said
-Here is the complete README.md file based on the code and workflow you have implemented.
+AR Tag Detection and Overlay Engine
 
-Markdown
-# Augmented Reality Tag Detection & Rendering Pipeline
+This project implements an Augmented Reality (AR) engine capable of detecting custom AR tags, estimating their pose, and overlaying either 2D images or 3D OBJ models onto them in real-time. It utilizes a custom C++ extension module for high-performance image processing operations.
 
-This project implements a custom Augmented Reality (AR) system capable of detecting fiducial markers (AR tags), estimating their pose, and overlaying 2D images or 3D OBJ models onto them in real-time. It utilizes a custom C++ optimized module (`customCV`) for core computer vision tasks and Python for the application logic.
+Prerequisites
 
-## Prerequisites
+Python 3.x
 
-* Python 3.x
-* OpenCV (`opencv-python`)
-* NumPy
-* A C++ Compiler (GCC/Clang/MSVC) for building the extension
+C++ Compiler (GCC/Clang/MSVC)
 
-## 1. Compiling the Custom CV Module
+Python Libraries:
 
-Before running the Python scripts, you must compile the C++ extension module (`customCV`) which handles high-performance image processing (Gaussian blurring and contour extraction).
+numpy
 
-1.  Ensure `setup.py` and the C++ source files (`customCV.cpp`, etc.) are in the root directory.
-2.  Open your terminal and run:
+opencv-python
 
-```bash
+Project Structure
+
+main.py: The entry point for the application.
+
+utils.py: Contains core logic (Tag detection, Homography, 3D Rendering, OBJ loading).
+
+customCV.so / customCV.pyd: The compiled C++ extension module.
+
+capture_calibration.py: Script to capture checkerboard images.
+
+calibrate_camera.py: Script to calculate camera intrinsics.
+
+assets/: Directory for calibration images, 3D models, and overlay templates.
+
+Step 1: Compiling the Custom Module
+
+Before running the Python scripts, you must compile the customCV C++ extension. This module handles heavy image processing tasks like Gaussian blurring and contour finding.
+
+Ensure you have a setup.py file configured for the customCV module.
+
+Open your terminal/command prompt in the project root.
+
+Run the build command:
+
 python setup.py build_ext --inplace
-Success: This will generate a shared object file (e.g., customCV.cpython-39-darwin.so on macOS or .pyd on Windows) in your current directory.
 
-2. Camera Calibration
-To ensure accurate 3D projection (Task 3), the camera's intrinsic parameters (focal length, optical center, distortion) must be calculated.
 
-Step A: Capture Calibration Images
-Run the capture script to take snapshots of a checkerboard pattern using your webcam.
+If successful, this will generate a .so (Linux/Mac) or .pyd (Windows) file in your directory.
 
-Print a standard checkerboard pattern (default settings expect 7 columns, 10 rows internal corners).
+Step 2: Camera Calibration
 
-Run the capture script:
+For accurate AR overlays, the system needs to know your camera's intrinsic parameters (focal length, optical center, distortion).
 
-Bash
+A. Capture Calibration Images
+
+Run the capture script to take photos of a checkerboard pattern using your webcam.
+
 python capture_calibration.py
-Controls:
 
-s: Save the current frame to assets/calibration_images/.
 
-q: Quit.
+Usage:
 
-Goal: Capture 10-20 images from different angles and distances.
+Hold a printed checkerboard visible to the camera.
 
-Step B: Generate Intrinsics
-Run the calibration script to process the captured images and generate the camera matrix.
+Press 's' to save a snapshot (aim for 10-20 images at different angles).
 
-Bash
+Press 'q' to quit.
+
+Images are saved to assets/calibration_images/.
+
+B. Generate Intrinsics
+
+Run the calibration script to process the saved images and generate the camera_calibration.npz file.
+
 python calibrate_camera.py
-This script reads images from assets/calibration_images/.
 
-It detects corners and computes the Camera Matrix (K) and Distortion Coefficients.
 
-Output: Saves the data to camera_calibration.npz. This file is required for overlay_object to work.
+Note: Ensure your checkerboard dimensions in the script match your physical board (default code assumes 7x10 internal corners).
 
-3. Usage & Main Pipeline
-The core logic is located in utils.py and executed via main.py.
+Output: camera_calibration.npz containing the camera matrix and distortion coefficients.
 
-Running the Application
-You can run the main application using command-line arguments to specify the video source and the assets you want to use.
+Step 3: Running the AR Application
 
-Basic Webcam Run:
+Once compiled and calibrated, you can run the main application.
 
-Bash
 python main.py
-Specifying a Video File:
 
-Bash
-python main.py --video "path/to/video.mp4"
-Modes of Operation
-You can toggle between different AR tasks by modifying the call inside the main.py loop or creating specific flags.
 
-A. Tag Detection & Visualization
-To simply detect tags, decode their IDs, and visualize boundaries, use detect_tags_in_image.
+By default, the main.py provided utilizes the overlay_object function to render a 3D model.
 
-Python
+Usage Guide: AR Functions
+
+You can modify the loop in main.py to use different visualization modes provided in utils.py.
+
+1. Tag Detection & ID Visualization
+
+To simply detect tags, draw their boundaries, and display their decoded binary ID:
+
 # In main.py
 from utils import detect_tags_in_image
 
+# Inside the video loop:
 output_frame = detect_tags_in_image(frame, resizing_factor=1)
 cv2.imshow("AR Output", output_frame)
-Functionality:
 
-Detects AR Tag contours.
 
-Decodes the binary ID from the 4x4 inner grid.
+2. 2D Image Overlay
 
-Visualizes the orientation (Blue dot at Top-Right).
+To warp a flat 2D image (like a logo or poster) onto the perspective of the detected tag:
 
-Draws the ID and bounding box.
-
-B. 2D Image Overlay
-To warp a 2D image (like a logo) onto the perspective of the tag, use overlay_image.
-
-Python
 # In main.py
 from utils import overlay_image
 
-# The template_path defaults to "assets/iitd_logo_template.jpg" inside the function
-output_frame = overlay_image(frame, template_path="assets/my_logo.jpg")
+# Ensure you have an image at the specified path
+template_path = "assets/iitd_logo_template.jpg"
+
+# Inside the video loop:
+output_frame = overlay_image(frame, template_path)
 cv2.imshow("AR Output", output_frame)
-Functionality:
 
-Calculates the Homography Matrix between the template corners and the detected tag corners.
 
-Warps the template using Inverse Perspective Mapping to fit the tag.
+3. 3D Object Overlay
 
-C. 3D Object Overlay
-To project a 3D .obj model (e.g., a wolf, chair, etc.) onto the tag, use overlay_object.
+To render a 3D .obj file on top of the tag. This function handles 3D projection, scaling, and orientation correction based on the tag's rotation.
 
-Python
 # In main.py
 from utils import overlay_object
 
-# Requires 'camera_calibration.npz' to exist
-output_frame = overlay_object(frame, object_path="assets/model1.obj")
+# Ensure you have a valid .obj file
+model_path = "assets/model1.obj"
+
+# Inside the video loop:
+output_frame = overlay_object(frame, model_path)
 cv2.imshow("AR Output", output_frame)
-Functionality:
-
-Loads camera intrinsics from camera_calibration.npz.
-
-Computes the Projection Matrix (P) by recovering Rotation (R) and Translation (t) vectors from the Homography.
-
-Parses the .obj file (vertices and faces).
-
-Renders the 3D mesh onto the 2D frame, handling rotation and scaling automatically.
-
-File Structure
-main.py: Entry point for the application.
-
-utils.py: Contains all Python helper functions (Math, File I/O, Rendering logic).
-
-customCV/: Source code for the C++ extension.
-
-capture_calibration.py: Utility to capture webcam frames.
-
-calibrate_camera.py: Utility to compute camera intrinsics.
-
-assets/: Directory for storing calibration images, 3D models, and 2D templates.

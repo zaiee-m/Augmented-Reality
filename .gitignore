@@ -1,6 +1,6 @@
 customCV.cpython-313-darwin.so
 camera_calibration.npz
-assets/calibration_images
+assets/calibration_images/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

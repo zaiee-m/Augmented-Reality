@@ -286,11 +286,33 @@ def extract_and_draw_ar_tags(frame, resizing_factor=1):
     # --- B. EXTRACT CONTOURS ---
     contours, hierarchy = customcv.find_contours(gradient)
 
-    tags = extract_tags(contours,hierarchy)
+    # The shapes that follow the inside a rectangle,
+    # corners >= 4, and shares center with parent criteria.
+    tag_candidates = extract_tags(contours,hierarchy)
+    
+    valid_tags = []
+
+    # Validtae candidate tags by checking the 2x2 boundary.
+    for tag in tag_candidates:
+        _, _, grid = decode_tag_id(frame, tag)
+        
+        if grid is None:
+            continue
+
+        is_boundary_valid = (
+            np.all(grid[0:2, :] == 0) and  # Top 2 rows are black
+            np.all(grid[-2:, :] == 0) and  # Bottom 2 rows are black
+            np.all(grid[:, 0:2] == 0) and  # Left 2 columns are black
+            np.all(grid[:, -2:] == 0)      # Right 2 columns are black
+        )
+
+        if is_boundary_valid:
+            valid_tags.append(tag)
+        
 
     corrected_contours = []
 
-    for cnt in tags:
+    for cnt in valid_tags:
         # Reshape to (N, 1, 2) and ensure it's int32.
         cnt_formatted = cnt.reshape((-1, 1, 2)).astype(np.int32)
         
@@ -298,7 +320,7 @@ def extract_and_draw_ar_tags(frame, resizing_factor=1):
 
     cv2.drawContours(frame,corrected_contours,-1,(0,255,0),3)
 
-    return frame, tags
+    return frame, valid_tags
 
 def detect_tags_in_image(frame, resizing_factor=1):
     """
@@ -319,7 +341,7 @@ def detect_tags_in_image(frame, resizing_factor=1):
         # Extact tag_id and orientation of the corner cell.
         # For e.g. angle=90 means the tag is rotated 90 degrees
         # clockwise from the correct orientation (white cell as bottom right).
-        tag_id, angle = decode_tag_id(frame, tag)
+        tag_id, angle, _ = decode_tag_id(frame, tag)
 
         # For tag_id visualization.
         cX, cY = get_polygon_centroid(tag)
@@ -370,19 +392,17 @@ def overlay_image(frame, template_path):
         raise FileNotFoundError("Could not load image at 'assets/iitd_logo_template.jpg'. Check the path and file integrity.")
     
     frame_with_ar_tag, tags = extract_and_draw_ar_tags(frame)
-
     output_frame = frame_with_ar_tag
 
     for tag in tags:
         # Determine current tag orientation.
-        _, angle = decode_tag_id(frame, tag)
+        _, angle, _ = decode_tag_id(frame, tag)
 
         # Reshape just in case.
         dest_corners = tag.reshape(4, 2).astype(np.float32)
 
         # Superimpose image onto the tag in angle orientation.
         output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
-    
     return output_frame
 
 def overlay_object(frame, object_path):
@@ -413,7 +433,7 @@ def overlay_object(frame, object_path):
     ], dtype=np.float32)
 
     for tag in tags:
-        tag_id, angle = decode_tag_id(frame, tag)
+        tag_id, angle, _ = decode_tag_id(frame, tag)
 
         # Convert detected corners to float32
         dest_corners = tag.reshape(4, 2).astype(np.float32)
@@ -598,9 +618,8 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
     def create_polygon_mask(h, w, pts):
         """
         Creates a binary mask for a convex polygon using pure NumPy (Edge Functions).
-        Replaces cv2.fillConvexPoly.
         """
-        # 1. Get Bounding Box (Optimization)
+        # Get Bounding Box.
         # We only compute math for pixels inside the rectangle enclosing the tag
         # rather than the entire 1080p frame.
         pts = pts.astype(int)
@@ -611,11 +630,11 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
         min_x, max_x = max(0, min_x), min(w, max_x)
         min_y, max_y = max(0, min_y), min(h, max_y)
 
-        # 2. Create Grid of Coordinates (Broadcasting)
+        # Create Grid of Coordinates (Broadcasting)
         # ogrid is faster than meshgrid for this purpose
         Y, X = np.ogrid[min_y:max_y, min_x:max_x]
 
-        # 3. Compute Edge Functions
+        # Compute Edge Functions
         # For a point to be inside a convex polygon, it must be on the same side
         # of all lines defined by the edges.
         
@@ -644,26 +663,43 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
             cp = pixel_dx * edge_dy - pixel_dy * edge_dx
             cross_products.append(cp)
 
-        # 4. Check Winding Order
-        # If points are Clockwise, all CP <= 0. If Counter-Clockwise, all CP >= 0.
-        # We stack them to check all conditions at once.
-        cp_stack = np.array(cross_products)
-        
-        # A point is inside if ALL cross products are positive OR ALL are negative
-        is_inside = np.all(cp_stack >= 0, axis=0) | np.all(cp_stack <= 0, axis=0)
+            # Check Winding Order
+            # If points are Clockwise, all CP <= 0. If Counter-Clockwise, all CP >= 0.
+            # We stack them to check all conditions at once.
+            cp_stack = np.array(cross_products)
+            
+            # A point is inside if ALL cross products are positive OR ALL are negative
+            is_inside = np.all(cp_stack >= 0, axis=0) | np.all(cp_stack <= 0, axis=0)
 
-        # 5. Place the small mask into the full-size mask
-        full_mask = np.zeros((h, w), dtype=np.uint8)
-        full_mask[min_y:max_y, min_x:max_x] = is_inside.astype(np.uint8) * 255
-        
+            # Place the small mask into the full-size mask
+            full_mask = np.zeros((h, w), dtype=np.uint8)
+            full_mask[min_y:max_y, min_x:max_x] = is_inside.astype(np.uint8) * 255
+            
         return full_mask
+        
+    mask = create_polygon_mask(h_frame, w_frame, dst_pts)
+
+    # Convert mask to a boolean for easy indexing
+    # We create a 3D boolean mask so it applies to all 3 color channels (BGR)
+    bool_mask = (mask > 0)
+
+    # Perform the Blend
+    # Create a copy of the frame to avoid modifying the original in-place
+    final_frame = frame.copy()
+
+    # Replace pixels where the mask is True with the foreground pixels
+    final_frame[bool_mask] = warped_img[bool_mask]
+    return final_frame
+        
 
 def decode_tag_id(frame, corners):
     """
     Docstring for decode_tag_id
     
-    :param frame: Description
-    :param corners: Description
+    Returns:
+        tag_id:
+        orientation:
+        grid:
     """
 
     def gray_image_mean(img, mask=None):
@@ -759,7 +795,7 @@ def decode_tag_id(frame, corners):
             
     # If we spun 360 and didn't find the anchor, the ID will likely be garbage (or 15).
     if not found:
-        return None, 0 # Return None to indicate read failure
+        return None, 0, None # Return None to indicate read failure
     
     # 5. Decode ID from Central 2x2
     # Grid: (3,3), (3,4), (4,3), (4,4)
@@ -770,7 +806,7 @@ def decode_tag_id(frame, corners):
     
     tag_id = (bit4 << 3) | (bit3 << 2) | (bit2 << 1) | bit1
 
-    return tag_id, orientation
+    return tag_id, orientation, grid
 
 def warp_perspective_manual(img, M, dsize):
     """

@@ -21,7 +21,7 @@ std::vector<float> create_kernel(int ksize, float sigma) {
     return kernel;
 }
 
-static PyObject* customCV_gaussian_blur(PyObject* self, PyObject* args) {
+static PyObject* customcv_gaussian_blur(PyObject* self, PyObject* args) {
     PyObject *in_obj, *out_obj;
     int ksize = 5;
     float sigma = 1.0f;
@@ -194,7 +194,7 @@ struct BorderInfo {
     int prev_sibling = -1;
 };
 
-static PyObject* customCV_find_contours(PyObject* self, PyObject* args) {
+static PyObject* customcv_find_contours(PyObject* self, PyObject* args) {
     PyArrayObject* in_arr;
     if (!PyArg_ParseTuple(args, "O!", &PyArray_Type, &in_arr)) return NULL;
 
@@ -313,19 +313,192 @@ for (int k = 0; k < num_found; ++k) {
     return result;
 }
 
+struct Point {
+    int x, y;
+};
+
+// --- Helper: Squared Euclidean Distance ---
+double distSq(Point p1, Point p2) {
+    double dx = p1.x - p2.x;
+    double dy = p1.y - p2.y;
+    return dx*dx + dy*dy;
+}
+
+// --- Helper: Perpendicular Distance Squared ---
+// Returns distance from point P to line segment AB
+double getPointLineDistSq(Point p, Point a, Point b) {
+    double dx = b.x - a.x;
+    double dy = b.y - a.y;
+    
+    if (dx == 0 && dy == 0) {
+        return distSq(p, a);
+    }
+
+    double numerator = (double)((dy * p.x) - (dx * p.y) + (b.x * a.y) - (b.y * a.x));
+    return (numerator * numerator) / (dx*dx + dy*dy);
+}
+
+// --- Internal RDP Logic (Open Chain) ---
+void rdp_open(const std::vector<Point>& points, double epsilon, std::vector<Point>& out_pts) {
+    int m = points.size();
+    if (m < 3) {
+        out_pts = points;
+        return;
+    }
+
+    std::vector<bool> keep(m, false);
+    keep[0] = true;
+    keep[m - 1] = true;
+
+    // Iterative Stack-based RDP (avoids recursion depth issues)
+    std::stack<std::pair<int, int>> stack;
+    stack.push({0, m - 1});
+    
+    double epsilon_sq = epsilon * epsilon;
+
+    while (!stack.empty()) {
+        std::pair<int, int> range = stack.top();
+        stack.pop();
+
+        int start = range.first;
+        int end = range.second;
+
+        if (end <= start + 1) continue;
+
+        double max_dist_sq = 0.0;
+        int max_idx = 0;
+
+        // Find point farthest from line segment
+        for (int i = start + 1; i < end; ++i) {
+            double d = getPointLineDistSq(points[i], points[start], points[end]);
+            if (d > max_dist_sq) {
+                max_dist_sq = d;
+                max_idx = i;
+            }
+        }
+
+        if (max_dist_sq > epsilon_sq) {
+            keep[max_idx] = true;
+            stack.push({max_idx, end});
+            stack.push({start, max_idx});
+        }
+    }
+
+    // Collect results
+    out_pts.reserve(m);
+    for (int i = 0; i < m; ++i) {
+        if (keep[i]) out_pts.push_back(points[i]);
+    }
+}
+
+static PyObject* customcv_approx_poly_dp(PyObject* self, PyObject* args) {
+    PyObject* in_obj;
+    double epsilon;
+    int closed = 0;
+
+    if (!PyArg_ParseTuple(args, "Odi", &in_obj, &epsilon, &closed)) return NULL;
+
+    PyArrayObject* in_arr = (PyArrayObject*)PyArray_FROM_OTF(in_obj, NPY_INT32, NPY_ARRAY_IN_ARRAY);
+    if (!in_arr) return NULL;
+
+    int num_points = (int)PyArray_DIM(in_arr, 0);
+    int* data = (int*)PyArray_DATA(in_arr);
+
+    // Safety check for tiny contours
+    if (num_points < 3) {
+        Py_INCREF(in_arr);
+        return (PyObject*)in_arr;
+    }
+
+    std::vector<Point> pts(num_points);
+    long long sum_x = 0, sum_y = 0;
+
+    // 1. Load Data & Calculate Centroid
+    for (int i = 0; i < num_points; ++i) {
+        pts[i].x = data[i * 2];
+        pts[i].y = data[i * 2 + 1];
+        if (closed) {
+            sum_x += pts[i].x;
+            sum_y += pts[i].y;
+        }
+    }
+
+    // --- CLOSED LOOP STABILIZATION (Your "Secret Sauce") ---
+    if (closed) {
+        // A. Filter redundant end point if input is already closed
+        if (pts.size() > 1 && pts.front().x == pts.back().x && pts.front().y == pts.back().y) {
+            pts.pop_back();
+            num_points--;
+            // Recalculate sums if strictly needed, but usually negligible for centroid
+        }
+
+        // B. Find Centroid
+        Point center;
+        center.x = (int)(sum_x / num_points);
+        center.y = (int)(sum_y / num_points);
+
+        // C. Find index farthest from centroid
+        double max_d2 = -1.0;
+        int best_idx = 0;
+        for (int i = 0; i < num_points; ++i) {
+            double d2 = distSq(pts[i], center);
+            if (d2 > max_d2) {
+                max_d2 = d2;
+                best_idx = i;
+            }
+        }
+
+        // D. Rotate vector so best_idx is at index 0
+        std::rotate(pts.begin(), pts.begin() + best_idx, pts.end());
+
+        // E. Make explicit closed loop (append first point to end)
+        pts.push_back(pts[0]);
+    }
+
+    // --- Run RDP ---
+    std::vector<Point> simp;
+    rdp_open(pts, epsilon, simp);
+
+    // --- Cleanup Closed Loop ---
+    if (closed && simp.size() > 1) {
+        Point first = simp.front();
+        Point last = simp.back();
+        
+        // If start and end are effectively the same, remove the duplicate
+        if (distSq(first, last) <= epsilon * epsilon) {
+            simp.pop_back();
+        }
+    }
+
+    // --- Output to NumPy ---
+    npy_intp out_dims[3] = {(npy_intp)(simp.size()), 1, 2};
+    PyObject* out_arr = PyArray_SimpleNew(3, out_dims, NPY_INT32);
+    int* out_data = (int*)PyArray_DATA((PyArrayObject*)out_arr);
+
+    for (size_t i = 0; i < simp.size(); ++i) {
+        out_data[i * 2 + 0] = simp[i].x;
+        out_data[i * 2 + 1] = simp[i].y;
+    }
+
+    Py_DECREF(in_arr);
+    return out_arr;
+}
+
+
 // Module boilerplate
 static PyMethodDef customcvMethods[] = {
-    {"gaussian_blur", (PyCFunction)customCV_gaussian_blur, METH_VARARGS, "Optimized Gaussian Blur"},
-    {"find_contours", (PyCFunction)customCV_find_contours, METH_VARARGS, "Suzuki-Abe Contour Detection"},
+    {"gaussian_blur", (PyCFunction)customcv_gaussian_blur, METH_VARARGS, "Optimized Gaussian Blur"},
+    {"find_contours", (PyCFunction)customcv_find_contours, METH_VARARGS, "Suzuki-Abe Contour Detection"},
+    {"approx_poly_dp", (PyCFunction)customcv_approx_poly_dp, METH_VARARGS, "Douglas-Peucker Polygon Approximation"},
     {NULL, NULL, 0, NULL}
 };
-static struct PyModuleDef customCV_module = { PyModuleDef_HEAD_INIT, "customCV", NULL, 0, customcvMethods };
+static struct PyModuleDef customcv_module = { PyModuleDef_HEAD_INIT, "customcv", NULL, 0, customcvMethods };
 extern "C" {
-    PyMODINIT_FUNC PyInit_customCV(void) {
+    PyMODINIT_FUNC PyInit_customcv(void) {
         // CRITICAL: Initialize NumPy API table
         // Without this, any PyArray_* call crashes the program.
         import_array(); 
         
-        return PyModuleDef_Init(&customCV_module);
+        return PyModuleDef_Init(&customcv_module);
     }
 }

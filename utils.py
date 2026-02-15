@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import math
-import customCV
+import customcv
 
 def generate_tag(cell_size=50, tag_id=0):
     """
@@ -273,7 +273,7 @@ def extract_and_draw_ar_tags(frame, resizing_factor=1):
     
     # 3. Blur (Gaussian)
     blurred = np.empty_like(grey)
-    customCV.gaussian_blur(grey, blurred, 5, 2.0)
+    customcv.gaussian_blur(grey, blurred, 5, 2.0)
     
     # 4. Binarization (Otsu's Method recommended for AR tags)
     # Using your existing binarization function
@@ -284,7 +284,7 @@ def extract_and_draw_ar_tags(frame, resizing_factor=1):
     # return gradient
     
     # --- B. EXTRACT CONTOURS ---
-    contours, hierarchy = customCV.find_contours(gradient)
+    contours, hierarchy = customcv.find_contours(gradient)
 
     tags = extract_tags(contours,hierarchy)
 
@@ -518,34 +518,30 @@ def extract_tags(contours, hierarchy):
                 continue
 
             # Filter 2: Centroid Check
-            M1 = cv2.moments(contours[i])
-            M2 = cv2.moments(contours[parent_id])
-            
-            if M1["m00"] != 0 and M2["m00"] != 0:
-                c1 = np.array([M1["m10"] / M1["m00"], M1["m01"] / M1["m00"]])
-                c2 = np.array([M2["m10"] / M2["m00"], M2["m01"] / M2["m00"]])
+            c1 = np.array(get_polygon_centroid(contours[i]))
+            c2 = np.array(get_polygon_centroid(contours[parent_id]))
                 
-                # Verify centers within < 10% of parent's diagonal
-                diagonal_approx = np.sqrt(area_parent)
-                if np.linalg.norm(c1 - c2) < (0.10 * diagonal_approx):
+            # Verify centers within < 10% of parent's diagonal
+            diagonal_approx = np.sqrt(area_parent)
+            if np.linalg.norm(c1 - c2) < (0.10 * diagonal_approx):
 
-                    # Filter 3: Check inner portion complexity
-                    p1 = arc_length(contours[i], True)
-                    approx1 = cv2.approxPolyDP(contours[i], 0.02 * p1, True)
-                    
-                    if len(approx1) > 4:
+                # Filter 3: Check inner portion complexity
+                p1 = arc_length(contours[i], True)
+                approx1 = customcv.approx_poly_dp(contours[i], 0.02 * p1, True)
+                
+                if len(approx1) > 4:
 
-                        # Filter 4: Look for quadrilateral parents (the tag border)
-                        p2 = arc_length(contours[parent_id], True)
-                        approx2 = cv2.approxPolyDP(contours[parent_id], 0.02 * p2, True)
+                    # Filter 4: Look for quadrilateral parents (the tag border)
+                    p2 = arc_length(contours[parent_id], True)
+                    approx2 = customcv.approx_poly_dp(contours[parent_id], 0.02 * p2, True)
+
+                    if len(approx2) == 4:
+                        # Order the 4 corners of the parent (the tag)
+                        ordered_corners = order_points(approx2)
+                        all_tag_corners.append(ordered_corners.astype(np.int32))
                         
-                        if len(approx2) == 4:
-                            # Order the 4 corners of the parent (the tag)
-                            ordered_corners = order_points(approx2)
-                            all_tag_corners.append(ordered_corners.astype(np.int32))
-                            
-                            # Mark parent as processed to avoid duplicate detection
-                            processed_parents.add(parent_id)
+                        # Mark parent as processed to avoid duplicate detection
+                        processed_parents.add(parent_id)
 
     return all_tag_corners
 
@@ -590,37 +586,77 @@ def superimpose_image(frame, tag_corners, template_image, orientation_angle):
     # We shift 'dst_pts' so the correct physical corner aligns with 'src_pts' [0,0]
     dst_pts = np.roll(dst_pts, shift_amount, axis=0)
 
-    # 4. Calculate Homography
-    H, _ = cv2.findHomography(src_pts, dst_pts)
+    # Calculate Homography
+    H = get_perspective_transform(src=src_pts, dst=dst_pts)
 
-    # 5. Warp the Template Image
+    # Warp the Template Image
     # This creates an image of the same size as 'frame', but with the template
     # warped into the correct position. Black everywhere else.
     h_frame, w_frame = frame.shape[:2]
-    warped_img = cv2.warpPerspective(template_image, H, (w_frame, h_frame))
+    warped_img = warp_perspective_manual(template_image, H, (w_frame, h_frame))
 
-    # 6. Create a Mask to composite
-    # We need to cut a hole in the frame where the tag is, and fill it with the warped image.
-    
-    # Create a mask of the warped image (White where the image is, Black elsewhere)
-    # Grayscale -> Threshold
-    mask = np.zeros((h_frame, w_frame), dtype=np.uint8)
-    cv2.fillConvexPoly(mask, dst_pts.astype(np.int32), 255)
-    
-    # Invert mask (Black hole where tag is, White elsewhere)
-    mask_inv = cv2.bitwise_not(mask)
-    
-    # 7. Blend
-    # Black out the area of the tag in the original frame
-    frame_bg = cv2.bitwise_and(frame, frame, mask=mask_inv)
-    
-    # Take only the warped image region
-    img_fg = cv2.bitwise_and(warped_img, warped_img, mask=mask)
-    
-    # Add them together
-    final_frame = cv2.add(frame_bg, img_fg)
-    
-    return final_frame
+    def create_polygon_mask(h, w, pts):
+        """
+        Creates a binary mask for a convex polygon using pure NumPy (Edge Functions).
+        Replaces cv2.fillConvexPoly.
+        """
+        # 1. Get Bounding Box (Optimization)
+        # We only compute math for pixels inside the rectangle enclosing the tag
+        # rather than the entire 1080p frame.
+        pts = pts.astype(int)
+        min_x, max_x = np.min(pts[:, 0]), np.max(pts[:, 0])
+        min_y, max_y = np.min(pts[:, 1]), np.max(pts[:, 1])
+
+        # Clip to image boundaries
+        min_x, max_x = max(0, min_x), min(w, max_x)
+        min_y, max_y = max(0, min_y), min(h, max_y)
+
+        # 2. Create Grid of Coordinates (Broadcasting)
+        # ogrid is faster than meshgrid for this purpose
+        Y, X = np.ogrid[min_y:max_y, min_x:max_x]
+
+        # 3. Compute Edge Functions
+        # For a point to be inside a convex polygon, it must be on the same side
+        # of all lines defined by the edges.
+        
+        # We essentially compute the Cross Product (Determinant) for every edge
+        # Value = (Px - Ax) * (By - Ay) - (Py - Ay) * (Bx - Ax)
+        
+        inside_mask = np.ones((max_y - min_y, max_x - min_x), dtype=bool)
+        
+        num_pts = len(pts)
+        cross_products = []
+        
+        for i in range(num_pts):
+            p1 = pts[i]
+            p2 = pts[(i + 1) % num_pts] # Wrap around to first point
+            
+            # Vector for Edge (P1 -> P2)
+            edge_dx = p2[0] - p1[0]
+            edge_dy = p2[1] - p1[1]
+            
+            # Vector from P1 to every pixel (X, Y)
+            # Note: X and Y are 2D grids broadcasted against scalars p1[0], p1[1]
+            pixel_dx = X - p1[0]
+            pixel_dy = Y - p1[1]
+            
+            # Cross Product (2D)
+            cp = pixel_dx * edge_dy - pixel_dy * edge_dx
+            cross_products.append(cp)
+
+        # 4. Check Winding Order
+        # If points are Clockwise, all CP <= 0. If Counter-Clockwise, all CP >= 0.
+        # We stack them to check all conditions at once.
+        cp_stack = np.array(cross_products)
+        
+        # A point is inside if ALL cross products are positive OR ALL are negative
+        is_inside = np.all(cp_stack >= 0, axis=0) | np.all(cp_stack <= 0, axis=0)
+
+        # 5. Place the small mask into the full-size mask
+        full_mask = np.zeros((h, w), dtype=np.uint8)
+        full_mask[min_y:max_y, min_x:max_x] = is_inside.astype(np.uint8) * 255
+        
+        return full_mask
 
 def decode_tag_id(frame, corners):
     """
@@ -629,7 +665,34 @@ def decode_tag_id(frame, corners):
     :param frame: Description
     :param corners: Description
     """
-    # 1. Perspective Transform
+
+    def gray_image_mean(img, mask=None):
+        """
+        Calculates the mean of a grayscale image, optionally using a mask.
+        Mimics cv2.mean() behavior for single-channel images.
+        
+        Args:
+            img: 2D numpy array (grayscale image).
+            mask: Optional 2D numpy array (binary mask).
+            
+        Returns:
+            float: The mean value.
+        """
+        # Case 1: No Mask
+        if mask is None:
+            return np.mean(img)
+        
+        # Case 2: With Mask
+        # We only care about pixels where mask is NOT zero
+        valid_pixels = img[mask != 0]
+        
+        # Edge Case: If mask is empty (all zeros), OpenCV returns 0.0
+        if valid_pixels.size == 0:
+            return 0.0
+            
+        return np.mean(valid_pixels)
+    
+    # Perspective Transform
     # Use a fixed size (e.g., 200px)
     size = 200
     cell_size = size // 8
@@ -645,11 +708,11 @@ def decode_tag_id(frame, corners):
     warped = warp_perspective_manual(frame, M, (size, size))
 
     if len(warped.shape) == 3 and warped.shape[2] == 3:
-        warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        warped = to_grayscale(warped)
 
     warped_bin = binarization(warped)
 
-    # 3. Read the Grid using CENTER SAMPLING
+    # Read the Grid using CENTER SAMPLING
     grid = np.zeros((8, 8), dtype=int)
     
     # Define a safe margin (e.g., 30%) to ignore the edges of each cell
@@ -669,12 +732,12 @@ def decode_tag_id(frame, corners):
                                      x_start+margin : x_end-margin]
             
             # If the center is mostly White, it's a 1.
-            if cv2.mean(cell_center)[0] > 127:
+            if gray_image_mean(cell_center) > 127:
                 grid[y, x] = 1
             else:
                 grid[y, x] = 0
 
-    # 4. Determine Orientation (Rotate until White Anchor is at Top-Right)
+    # Determine Orientation (Rotate until White Anchor is at Top-Right)
     # The Inner 4x4 grid is indices 2 to 5.
     # Top-Right of inner grid is at index [2, 5].
     
@@ -1072,38 +1135,6 @@ def perpendicular_distance(point, line_start, line_end):
     # Standard formula for distance from point to line (x1,y1) to (x2,y2)
     return np.abs(np.cross(line_end - line_start, line_start - point)) / np.linalg.norm(line_end - line_start)
 
-def approx_poly_dp(points, epsilon):
-    """
-    Simplifies a list of points using the Douglas-Peucker algorithm.
-    points: Nx2 numpy array
-    epsilon: distance threshold for simplification
-    """
-    if len(points) < 3:
-        return points
-
-    # Find the point with the maximum distance from the line connecting start and end
-    dmax = 0
-    index = 0
-    start_point = points[0]
-    end_point = points[-1]
-
-    for i in range(1, len(points) - 1):
-        d = perpendicular_distance(points[i], start_point, end_point)
-        if d > dmax:
-            index = i
-            dmax = d
-
-    # If max distance is greater than epsilon, recursively simplify
-    if dmax > epsilon:
-        # Recursive calls
-        left_side = approx_poly_dp(points[:index+1], epsilon)
-        right_side = approx_poly_dp(points[index:], epsilon)
-
-        # Build the result list (avoid duplicating the middle point)
-        return np.vstack((left_side[:-1], right_side))
-    else:
-        # All points are close enough; just return the endpoints
-        return np.array([start_point, end_point])
         
 def arc_length(contour, closed=True):
     """

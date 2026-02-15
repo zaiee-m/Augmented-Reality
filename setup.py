@@ -40,7 +40,7 @@ else:
 
 # --- DEFINE EXTENSION ---
 module = Extension(
-    'customCV',
+    'customcv',
     sources=['customcvmodule.cpp'],
     include_dirs=include_dirs,
     library_dirs=library_dirs,
@@ -50,6 +50,6 @@ module = Extension(
 )
 
 setup(
-    name='customCV',
+    name='customcv',
     ext_modules=[module]
 )

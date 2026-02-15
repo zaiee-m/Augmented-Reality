@@ -293,26 +293,26 @@ def extract_and_draw_ar_tags(frame, resizing_factor=1):
     valid_tags = []
 
     # Validtae candidate tags by checking the 2x2 boundary.
-    for tag in tag_candidates:
-        _, _, grid = decode_tag_id(frame, tag)
+    # for tag in tag_candidates:
+    #     _, _, grid = decode_tag_id(frame, tag)
         
-        if grid is None:
-            continue
+    #     if grid is None:
+    #         continue
 
-        is_boundary_valid = (
-            np.all(grid[0:2, :] == 0) and  # Top 2 rows are black
-            np.all(grid[-2:, :] == 0) and  # Bottom 2 rows are black
-            np.all(grid[:, 0:2] == 0) and  # Left 2 columns are black
-            np.all(grid[:, -2:] == 0)      # Right 2 columns are black
-        )
+    #     is_boundary_valid = (
+    #         np.all(grid[0:2, :] == 0) and  # Top 2 rows are black
+    #         np.all(grid[-2:, :] == 0) and  # Bottom 2 rows are black
+    #         np.all(grid[:, 0:2] == 0) and  # Left 2 columns are black
+    #         np.all(grid[:, -2:] == 0)      # Right 2 columns are black
+    #     )
 
-        if is_boundary_valid:
-            valid_tags.append(tag)
+    #     if is_boundary_valid:
+    #         valid_tags.append(tag)
         
 
     corrected_contours = []
 
-    for cnt in valid_tags:
+    for cnt in tag_candidates:
         # Reshape to (N, 1, 2) and ensure it's int32.
         cnt_formatted = cnt.reshape((-1, 1, 2)).astype(np.int32)
         
@@ -320,7 +320,7 @@ def extract_and_draw_ar_tags(frame, resizing_factor=1):
 
     cv2.drawContours(frame,corrected_contours,-1,(0,255,0),3)
 
-    return frame, valid_tags
+    return frame, tag_candidates
 
 def detect_tags_in_image(frame, resizing_factor=1):
     """
@@ -405,7 +405,7 @@ def overlay_image(frame, template_path):
         output_frame = superimpose_image(output_frame, dest_corners, template_img, angle)
     return output_frame
 
-def overlay_object(frame, object_path):
+def overlay_object(frame, object_path, webcam=True):
     """
     Overlays a 3d .obj file onto an ar tag in the frame.
     
@@ -423,7 +423,10 @@ def overlay_object(frame, object_path):
     square_size = 100
     dummy_model_surface = np.zeros((square_size, square_size), dtype=np.uint8)
 
-    mtx, _ = load_calibration()
+    if(webcam):
+        mtx = load_calibration()
+    else:
+        mtx= load_calibration("given_calibration.npz")
 
     dst_points = np.array([
         [0, 0],
@@ -1285,5 +1288,4 @@ def load_calibration(filepath="camera_calibration.npz"):
     
     with np.load(filepath) as data:
         mtx = data['mtx']
-        dist = data['dist']
-    return mtx, dist
+    return mtx

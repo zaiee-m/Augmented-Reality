@@ -22,9 +22,9 @@ def main():
         ret, frame = cap.read()
         if not ret:
             break
-        cv2.imshow("Frame", overlay_object(frame, "assets/model3.obj"))
+        cv2.imshow("Frame", detect_tags_in_image(frame))
         
-        if cv2.waitKey(33) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
             
     cap.release()

@@ -52,7 +52,7 @@ cv2.destroyAllWindows()
 ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
 
 print("Camera matrix:\n", mtx)
-print("\nDistortion coefficients:\n", dist)\
+print("\nDistortion coefficients:\n", dist)
 
 # --- SAVE DATA ---
 # Save the camera matrix and distortion coefficients to a file
